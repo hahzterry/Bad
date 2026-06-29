@@ -35,6 +35,18 @@ interface TokenLaunchProps {
   onClose: () => void;
   onSuccess?: (tokenMint: string) => void;
   username?: string;
+  /**
+   * Pre-fills the launch form — used by "Launch as coin" on a post so the
+   * creator only has to confirm. Any field left undefined falls back to the
+   * username-based defaults.
+   */
+  prefill?: {
+    name?: string;
+    symbol?: string;
+    description?: string;
+    imageUrl?: string;
+    twitter?: string;
+  };
 }
 
 function friendlyError(msg: string): string {
@@ -50,14 +62,14 @@ function friendlyError(msg: string): string {
   return msg;
 }
 
-export default function TokenLaunch({ onClose, onSuccess, username }: TokenLaunchProps) {
+export default function TokenLaunch({ onClose, onSuccess, username, prefill }: TokenLaunchProps) {
   const { publicKey, signTransaction, signAllTransactions } = useWallet();
   const [step, setStep] = useState<"form" | "creating" | "launching" | "success">("form");
-  const [name, setName] = useState(username ? `${username}` : "");
-  const [symbol, setSymbol] = useState(username ? username.toUpperCase().slice(0, 6) : "");
-  const [description, setDescription] = useState("");
-  const [imageUrl, setImageUrl] = useState("");
-  const [twitter, setTwitter] = useState("");
+  const [name, setName] = useState(prefill?.name ?? (username ? `${username}` : ""));
+  const [symbol, setSymbol] = useState(prefill?.symbol ?? (username ? username.toUpperCase().slice(0, 6) : ""));
+  const [description, setDescription] = useState(prefill?.description ?? "");
+  const [imageUrl, setImageUrl] = useState(prefill?.imageUrl ?? "");
+  const [twitter, setTwitter] = useState(prefill?.twitter ?? "");
   const [website, setWebsite] = useState("");
   const [initialBuy, setInitialBuy] = useState("0");
   const [imageFile, setImageFile] = useState<File | null>(null);
@@ -349,6 +361,16 @@ export default function TokenLaunch({ onClose, onSuccess, username }: TokenLaunc
               </div>
             )}
 
+            {/* Launched from a post — reassure it's pre-filled, just review & launch */}
+            {prefill && (
+              <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-xl">
+                <Coins className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <span className="text-xs text-amber-700">
+                  We filled this in from your post — just review the name & symbol and launch. 🪙
+                </span>
+              </div>
+            )}
+
             {/* Token Name */}
             <div>
               <label className="text-xs font-medium text-[#64748B] mb-1.5 block">Token Name *</label>
@@ -409,7 +431,7 @@ export default function TokenLaunch({ onClose, onSuccess, username }: TokenLaunc
                   </div>
                 </div>
               ) : (
-                <label className="flex flex-col items-center justify-center w-full h-28 border-2 border-dashed border-[#E2E8F0] rounded-xl cursor-pointer hover:border-[#2563EB]/40 hover:bg-[#EFF6FF]/50 transition">
+                <label className="flex flex-col items-center justify-center w-full h-28 border-2 border-dashed border-amber-300 bg-amber-50/40 rounded-xl cursor-pointer hover:border-amber-400 hover:bg-amber-50 transition">
                   <input
                     type="file"
                     accept="image/*"
@@ -426,8 +448,8 @@ export default function TokenLaunch({ onClose, onSuccess, username }: TokenLaunc
                     </>
                   ) : (
                     <>
-                      <Upload className="w-6 h-6 text-[#94A3B8] mb-1" />
-                      <span className="text-sm text-[#64748B]">Click to upload image</span>
+                      <Upload className="w-6 h-6 text-amber-500 mb-1" />
+                      <span className="text-sm font-medium text-[#475569]">Add a coin image to launch</span>
                       <span className="text-xs text-[#94A3B8] mt-0.5">PNG, JPG, GIF — max 5MB</span>
                     </>
                   )}
@@ -634,6 +656,9 @@ export default function TokenLaunch({ onClose, onSuccess, username }: TokenLaunc
               <Rocket className="w-4 h-4" />
               Launch Token on Bags
             </button>
+            <p className="text-center text-[10px] text-[#94A3B8] mt-2">
+              You pay the one-time launch cost (~0.02 SOL network + rent){Number(initialBuy) > 0 ? ` + ${initialBuy} SOL initial buy` : ""} from your wallet.
+            </p>
           </div>
         )}
       </div>

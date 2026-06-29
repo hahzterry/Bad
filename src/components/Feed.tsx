@@ -19,6 +19,36 @@ import { ShyftClient, clearRpcCache } from "@/lib/program";
 import ProfileHoverCard from "@/components/ProfileHoverCard";
 import TrendingTokenCard, { type TrendingToken } from "@/components/TrendingTokenCard";
 import TokenTrade from "@/components/TokenTrade";
+import FeaturedToken from "@/components/FeaturedToken";
+import TokenLaunch from "@/components/TokenLaunch";
+import PostTokenCard from "@/components/PostTokenCard";
+
+/** A post that launched a coin is tagged on-chain with "COIN:<mint>" (hidden from display). */
+const COIN_MARKER_RE = /\n?COIN:([1-9A-HJ-NP-Za-km-z]{32,44})/;
+export function extractCoinMint(content: string): string {
+  return content?.match(COIN_MARKER_RE)?.[1] || "";
+}
+export function stripCoinMarker(content: string): string {
+  return (content || "").replace(COIN_MARKER_RE, "").trimEnd();
+}
+
+/** Pull the first image URL out of a post's content for use as a token image. */
+function firstImageUrl(content: string): string {
+  const urls = content.match(/https?:\/\/[^\s<]+/gi) || [];
+  for (const u of urls) {
+    if (/\.(png|jpe?g|gif|webp|avif)(\?|$)/i.test(u) || /\/ipfs\//i.test(u)) return u;
+  }
+  return "";
+}
+
+/** Strip Shyft content prefixes (PAID|, COMM|, RT|) and URLs to get clean text. */
+function cleanPostText(content: string): string {
+  let t = stripCoinMarker(content || "");
+  if (t.startsWith("PAID|")) t = t.split("|").slice(2).join("|");
+  else if (t.startsWith("COMM|")) t = t.split("|").slice(2).join("|");
+  else if (t.startsWith("RT|")) t = t.split("|").slice(2).join("|");
+  return t.replace(/https?:\/\/[^\s]+/g, "").replace(/\s+/g, " ").trim();
+}
 
 /** Parse a paid post: content starts with PAID|<price>|<actual content> */
 function parsePaidPost(content: string): { isPaid: boolean; price: number; actualContent: string } {
@@ -119,8 +149,11 @@ export function OnChainPostCard({
   const [editText, setEditText] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
   const [localContent, setLocalContent] = useState<string | null>(null);
+  // If this post launched a coin, its mint is tagged on-chain in the content.
+  const coinMint = extractCoinMint(localContent ?? post.content);
   const [unlocking, setUnlocking] = useState(false);
   const [showTip, setShowTip] = useState(false);
+  const [showLaunch, setShowLaunch] = useState(false);
   const [tipping, setTipping] = useState(false);
   const [tipAmount, setTipAmount] = useState("");
   const [flexing, setFlexing] = useState(false);
@@ -469,7 +502,8 @@ export function OnChainPostCard({
       <div className="mb-3 pl-0 sm:pl-14">
         {(() => {
           // Determine the content to render (use localContent if edited, actualContent for paid posts that are unlocked)
-          const renderContent = localContent ?? (isPaid && isUnlocked ? actualContent : post.content);
+          // Strip the hidden COIN:<mint> tag — it's surfaced as a token card below instead.
+          const renderContent = stripCoinMarker(localContent ?? (isPaid && isUnlocked ? actualContent : post.content));
 
           // Paid post — locked state
           if (isPaid && !isUnlocked) {
@@ -588,6 +622,11 @@ export function OnChainPostCard({
           return <RichContent content={renderContent} />;
         })()}
       </div>
+
+      {/* Token card — shown when this post has launched a coin */}
+      {coinMint && (
+        <PostTokenCard mint={coinMint} fallbackImage={firstImageUrl(localContent ?? post.content)} />
+      )}
 
       {/* Reaction pills (show aggregated reactions) */}
       {postReactions.length > 0 && (
@@ -764,7 +803,8 @@ export function OnChainPostCard({
             setReposting(true);
             try {
               const authorName = profile?.username ? `@${profile.username}` : post.author.slice(0, 8);
-              const preview = post.content.length > 200 ? post.content.slice(0, 200) + "..." : post.content;
+              const cleanForRepost = stripCoinMarker(post.content);
+              const preview = cleanForRepost.length > 200 ? cleanForRepost.slice(0, 200) + "..." : cleanForRepost;
               const repostContent = `RT|${authorName}|${preview}`;
               onRepost(repostContent);
               toast("success", "Reposted! 🔁", "Creating on-chain repost...");
@@ -786,7 +826,7 @@ export function OnChainPostCard({
             const authorName = profile?.username ? `@${profile.username}` : post.author.slice(0, 8);
             const postUrl = `https://www.shyft.lol/post/${post.author}-${post.postId}`;
             // Clean share text: strip IPFS hashes, URLs, and protocol prefixes for tweet-friendly text
-            let rawText = post.content || "";
+            let rawText = stripCoinMarker(post.content || "");
             // Strip PAID|, COMM|, RT| prefixes
             if (rawText.startsWith("PAID|")) rawText = "🔒 Paid post";
             else if (rawText.startsWith("COMM|")) rawText = rawText.split("|").slice(2).join("|");
@@ -827,6 +867,19 @@ export function OnChainPostCard({
             className="touch-active flex items-center gap-1.5 px-3 py-2 sm:py-1.5 rounded-lg text-xs font-medium text-[#94A3B8] hover:text-[#2563EB] hover:bg-[#EBF4FF] active:bg-[#EBF4FF] transition-all"
           >
             <Pencil className="w-4 h-4" />
+          </button>
+        )}
+
+        {/* Launch as coin (own posts only) — turn the post into a tradeable token.
+            The post owner pays the launch fee (NOT sponsored, unlike posting).
+            Hidden once the post already has a coin. */}
+        {isMe && !isPaid && !coinMint && (
+          <button
+            onClick={() => setShowLaunch(true)}
+            title="Launch this post as a coin"
+            className="touch-active flex items-center gap-1.5 px-3 py-2 sm:py-1.5 rounded-lg text-xs font-medium text-[#94A3B8] hover:text-[#D97706] hover:bg-[#FFFBEB] active:bg-[#FFFBEB] transition-all"
+          >
+            <Coins className="w-4 h-4" />
           </button>
         )}
 
@@ -1012,6 +1065,36 @@ export function OnChainPostCard({
             </div>
           )}
         </div>
+      )}
+
+      {/* Launch-as-coin modal (own posts). Pre-filled from the post; owner pays the fee. */}
+      {showLaunch && (
+        <TokenLaunch
+          username={profile?.username}
+          prefill={{
+            name: profile?.username ? `${profile.username}` : undefined,
+            description: cleanPostText(localContent ?? post.content) || undefined,
+            imageUrl: firstImageUrl(localContent ?? post.content) || profile?.avatarUrl || undefined,
+            twitter: profile?.twitter || undefined,
+          }}
+          onClose={() => setShowLaunch(false)}
+          onSuccess={async (mint) => {
+            setShowLaunch(false);
+            toast("success", "Your post is now a coin! 🪙", "Live on Solana");
+            // Tag the post on-chain with the mint so the token card shows for everyone.
+            try {
+              const base = localContent ?? post.content;
+              if (program && mint && !extractCoinMint(base)) {
+                const tagged = `${base}\nCOIN:${mint}`;
+                setLocalContent(tagged); // optimistic — card appears immediately
+                await program.editPost(Number(post.postId), tagged);
+              }
+            } catch (err) {
+              // Token still launched; tagging is best-effort (e.g. content length limit).
+              console.warn("Failed to tag post with coin mint:", err);
+            }
+          }}
+        />
       )}
     </div>
   );
@@ -1749,6 +1832,9 @@ export default function Feed() {
       {/* On-chain public posts from all users */}
       {isConnected && (
         <div className="mt-2">
+          {/* Pinned featured token — spotlighted at the top of the feed */}
+          <FeaturedToken />
+
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
               <Globe className="w-4 h-4 text-[#2563EB]" />

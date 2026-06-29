@@ -115,6 +115,62 @@ export async function GET(req: NextRequest) {
         return ok(tokens);
       }
 
+      case "token-meta": {
+        // Metadata (name/symbol/image/description) for a single mint.
+        // Primary source is the Bags launch feed — the same data the Tokens page
+        // shows — so a freshly launched coin resolves correctly. Falls back to
+        // Helius DAS on-chain metadata if the token isn't in the feed.
+        const mint = searchParams.get("mint");
+        if (!mint) return err("Missing mint parameter");
+
+        // 1) Bags launch feed (authoritative for Bags-launched tokens).
+        try {
+          const feed: any[] = await sdk.bagsApiClient.get("/token-launch/feed");
+          if (Array.isArray(feed)) {
+            const t = feed.find((x) => x?.tokenMint === mint);
+            if (t && (t.name || t.symbol || t.image)) {
+              return ok({
+                tokenMint: mint,
+                name: t.name || "",
+                symbol: (t.symbol || "").replace(/^\$/, ""),
+                description: t.description || "",
+                image: t.image || "",
+              });
+            }
+          }
+        } catch (e) {
+          console.warn("[token-meta] feed lookup failed:", e);
+        }
+
+        // 2) Fall back to Helius DAS on-chain metadata.
+        try {
+          const heliusUrl = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY_PRIVATE}`;
+          const dasRes = await fetch(heliusUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              method: "getAsset",
+              params: { id: mint },
+            }),
+          });
+          const dasData = await dasRes.json();
+          const content = dasData?.result?.content || {};
+          const metadata = content?.metadata || {};
+          const image = content?.links?.image || content?.files?.[0]?.uri || "";
+          return ok({
+            tokenMint: mint,
+            name: metadata.name || "",
+            symbol: (metadata.symbol || "").replace(/^\$/, ""),
+            description: metadata.description || "",
+            image,
+          });
+        } catch (e: any) {
+          return err(e?.message || "Failed to load token metadata", 500);
+        }
+      }
+
       case "user-tokens": {
         const wallet = searchParams.get("wallet");
         if (!wallet) return err("Missing wallet parameter");
@@ -203,7 +259,7 @@ export async function GET(req: NextRequest) {
       }
 
       default:
-        return err("Unknown action. Use: feed, creators, fees, lifetime-fees, top-tokens, user-tokens");
+        return err("Unknown action. Use: feed, creators, fees, lifetime-fees, top-tokens, user-tokens, token-meta");
     }
   } catch (error: any) {
     console.error("[Bags GET]", error);

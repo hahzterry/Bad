@@ -22,10 +22,16 @@ interface TokenTradeProps {
   tokenImage?: string;
   onClose?: () => void;
   compact?: boolean;
-  /** Decimals of the non-SOL token (default 9, e.g. Bags tokens). xStocks use 8. */
+  /** Decimals of the non-SOL token (default 9, e.g. Bags tokens). xStocks use 8, pump.fun use 6. */
   decimals?: number;
   /** Show Bags.fm links/attribution. Set false for non-Bags tokens (e.g. xStocks). */
   showBagsLinks?: boolean;
+  /**
+   * Which router to quote/swap through. Defaults to auto: pump.fun mints
+   * (ending in "pump") route via Jupiter since Bags can't price them;
+   * everything else goes through Bags.
+   */
+  provider?: "bags" | "jupiter" | "auto";
 }
 
 function friendlyError(msg: string): string {
@@ -49,10 +55,17 @@ export default function TokenTrade({
   tokenImage,
   onClose,
   compact = false,
-  decimals = 9,
+  decimals: decimalsProp,
   showBagsLinks = true,
+  provider = "auto",
 }: TokenTradeProps) {
   const { publicKey, signTransaction } = useWallet();
+
+  // pump.fun tokens use 6 decimals and can't be priced by Bags — route via Jupiter.
+  const isPumpToken = tokenMint.endsWith("pump");
+  const useJupiter = provider === "jupiter" || (provider === "auto" && isPumpToken);
+  const tradeApi = useJupiter ? "/api/jup" : "/api/bags";
+  const decimals = decimalsProp ?? (isPumpToken ? 6 : 9);
   const [mode, setMode] = useState<"buy" | "sell">("buy");
   const [amount, setAmount] = useState("");
   const [loading, setLoading] = useState(false);
@@ -122,7 +135,7 @@ export default function TokenTrade({
         const inputDecimals = mode === "buy" ? 9 : decimals;
         const amountSmallest = Math.floor(Number(amount) * Math.pow(10, inputDecimals));
 
-        const res = await fetch("/api/bags", {
+        const res = await fetch(tradeApi, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "quote", inputMint, outputMint, amount: amountSmallest }),
@@ -146,7 +159,7 @@ export default function TokenTrade({
     setError("");
 
     try {
-      const res = await fetch("/api/bags", {
+      const res = await fetch(tradeApi, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "swap", quoteResponse: quote, userPublicKey: publicKey.toBase58() }),
@@ -191,7 +204,7 @@ export default function TokenTrade({
             {mode === "buy" ? "Buy" : "Sell"} ${tokenSymbol}
           </span>
         </div>
-        {showBagsLinks && (
+        {!useJupiter && showBagsLinks && (
           <a
             href={`https://bags.fm/${tokenMint}`}
             target="_blank"
@@ -361,7 +374,7 @@ export default function TokenTrade({
 
       {/* Attribution */}
       <p className="text-center text-[10px] text-[#94A3B8] mt-2">
-        {showBagsLinks ? (
+        {!useJupiter && showBagsLinks ? (
           <>
             Trading powered by{" "}
             <a href="https://bags.fm" target="_blank" rel="noopener noreferrer" className="text-[#2563EB] hover:underline">
