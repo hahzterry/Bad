@@ -49,7 +49,7 @@ export default function TrendingTokenCard({ token, onTrade }: TrendingTokenCardP
   const isUp = (change ?? 0) >= 0;
   const hasChart = !!token.pairAddress;
 
-  const bagsUrl = `https://bags.fm/${token.tokenMint}`;
+  const kickstartUrl = `https://kickstart.easya.io/token/${token.tokenMint}`;
   const dexUrl = token.pairAddress
     ? `https://dexscreener.com/solana/${token.pairAddress}`
     : `https://dexscreener.com/solana/${token.tokenMint}`;
@@ -63,7 +63,7 @@ export default function TrendingTokenCard({ token, onTrade }: TrendingTokenCardP
       <div className="flex items-center gap-1.5 mb-2.5">
         <div className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-[#FEF3C7] border border-[#FCD34D]">
           <Flame className="w-3 h-3 text-[#D97706]" />
-          <span className="text-[10px] font-bold text-[#92400E] uppercase tracking-wide">Trending on Bags</span>
+          <span className="text-[10px] font-bold text-[#92400E] uppercase tracking-wide">Trending on Kickstart</span>
         </div>
       </div>
 
@@ -131,12 +131,12 @@ export default function TrendingTokenCard({ token, onTrade }: TrendingTokenCardP
           </button>
         )}
         <a
-          href={bagsUrl}
+          href={kickstartUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-gradient-to-r from-[#16A34A] to-[#15803D] text-white text-xs font-bold rounded-xl hover:opacity-90 transition"
         >
-          Buy on Bags
+          Buy on Kickstart
           <ExternalLink className="w-3 h-3" />
         </a>
         {hasChart && (

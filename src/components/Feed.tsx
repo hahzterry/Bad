@@ -1444,12 +1444,12 @@ export default function Feed() {
     fetchOnchainPosts();
   }, [program, publicKey]);
 
-  // Fetch trending Bags tokens for inline feed cards (refresh every 2 min)
+  // Fetch trending Kickstart launches for inline feed cards (refresh every 2 min)
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
-        const res = await fetch("/api/bags/trending");
+        const res = await fetch("/api/kickstart/trending");
         const data = await res.json();
         if (!cancelled && data?.success && Array.isArray(data.response)) {
           setTrendingTokens(data.response);

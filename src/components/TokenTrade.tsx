@@ -65,7 +65,11 @@ export default function TokenTrade({
   const isPumpToken = tokenMint.endsWith("pump");
   const useJupiter = provider === "jupiter" || (provider === "auto" && isPumpToken);
   const tradeApi = useJupiter ? "/api/jup" : "/api/bags";
-  const decimals = decimalsProp ?? (isPumpToken ? 6 : 9);
+  // Decimals must match the mint exactly — a wrong guess mis-scales both the
+  // quote amount and the displayed output by orders of magnitude. Start from
+  // an explicit prop or a heuristic, then resolve the real value on-chain below.
+  const fallbackDecimals = decimalsProp ?? (isPumpToken ? 6 : 9);
+  const [decimals, setDecimals] = useState<number>(fallbackDecimals);
   const [mode, setMode] = useState<"buy" | "sell">("buy");
   const [amount, setAmount] = useState("");
   const [loading, setLoading] = useState(false);
@@ -74,6 +78,34 @@ export default function TokenTrade({
   const [error, setError] = useState("");
   const [tokenBalance, setTokenBalance] = useState<number | null>(null);
   const [loadingBalance, setLoadingBalance] = useState(false);
+
+  // Resolve the mint's real decimals on-chain so quotes/displays are exact.
+  // An explicit decimalsProp always wins (caller knows better, e.g. xStocks).
+  useEffect(() => {
+    if (decimalsProp != null) {
+      setDecimals(decimalsProp);
+      return;
+    }
+    let cancelled = false;
+    // Reset to the heuristic while the real value loads so we never carry a
+    // previous token's decimals into a new mint.
+    setDecimals(isPumpToken ? 6 : 9);
+    (async () => {
+      try {
+        const res = await fetch("/api/rpc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getTokenSupply", params: [tokenMint] }),
+        });
+        const data = await res.json();
+        const dec = data?.result?.value?.decimals;
+        if (!cancelled && typeof dec === "number") setDecimals(dec);
+      } catch (e) {
+        console.warn("Failed to resolve token decimals, using fallback:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [tokenMint, decimalsProp, isPumpToken]);
 
   // Fetch token balance when switching to sell mode
   useEffect(() => {
@@ -151,7 +183,7 @@ export default function TokenTrade({
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [amount, mode, tokenMint]);
+  }, [amount, mode, tokenMint, decimals]);
 
   const handleTrade = async () => {
     if (!publicKey || !signTransaction || !quote) return;
@@ -206,12 +238,12 @@ export default function TokenTrade({
         </div>
         {!useJupiter && showBagsLinks && (
           <a
-            href={`https://bags.fm/${tokenMint}`}
+            href={`https://kickstart.easya.io/token/${tokenMint}`}
             target="_blank"
             rel="noopener noreferrer"
             className="text-xs text-[#94A3B8] hover:text-[#2563EB] flex items-center gap-1"
           >
-            Bags <ExternalLink className="w-3 h-3" />
+            Kickstart <ExternalLink className="w-3 h-3" />
           </a>
         )}
       </div>
@@ -377,8 +409,8 @@ export default function TokenTrade({
         {!useJupiter && showBagsLinks ? (
           <>
             Trading powered by{" "}
-            <a href="https://bags.fm" target="_blank" rel="noopener noreferrer" className="text-[#2563EB] hover:underline">
-              Bags.fm
+            <a href="https://kickstart.easya.io" target="_blank" rel="noopener noreferrer" className="text-[#2563EB] hover:underline">
+              Kickstart
             </a>
           </>
         ) : (
