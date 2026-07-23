@@ -258,11 +258,11 @@ export default function Quests() {
         )}
       </div>
 
-      {/* Season pool note */}
+      {/* Season note */}
       <div className="bg-[#F0FDF4] border border-[#BBF7D0] rounded-2xl px-4 py-3">
         <p className="text-xs text-[#15803D]">
-          <span className="font-semibold">1% of every trade feeds the season pool.</span>{" "}
-          At season end, points holders split a $SHYFT reward pool funded by protocol buybacks — pro-rata by points.
+          <span className="font-semibold">Top of the leaderboard gets rewarded at season end.</span>{" "}
+          Details soon — keep stacking points.
         </p>
       </div>
     </div>
