@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useWallet } from "@/hooks/usePrivyWallet";
 import { useAppStore } from "@/lib/store";
+import { SOCIAL_ACTIONS } from "@/lib/quests";
 
 type Quest = { action: string; label: string; points: number; done: number; cap: number };
 type Trading = {
@@ -49,6 +50,15 @@ function fmtPts(n: number): string {
   if (n >= 10_000) return (n / 1000).toFixed(1) + "k";
   return n.toLocaleString();
 }
+
+/**
+ * The quest list as the API would return it for a wallet with no activity.
+ * Used until the wallet resolves (Privy is async) or when signed out, so the
+ * checklist is never rendered empty.
+ */
+const FALLBACK_QUESTS: Quest[] = Object.entries(SOCIAL_ACTIONS).map(
+  ([action, cfg]) => ({ action, label: cfg.label, points: cfg.points, done: 0, cap: cfg.dailyCap }),
+);
 
 export default function Quests() {
   const { publicKey } = useWallet();
@@ -127,7 +137,7 @@ export default function Quests() {
       <div className="bg-white rounded-2xl shadow-sm border border-[#E2E8F0] p-5">
         <h3 className="text-sm font-bold text-[#1A1A2E] mb-3">Daily quests</h3>
         <div className="space-y-2.5">
-          {(user?.quests || []).map((q) => {
+          {(user?.quests?.length ? user.quests : FALLBACK_QUESTS).map((q) => {
             const complete = q.done >= q.cap;
             return (
               <div key={q.action} className="flex items-center gap-3">
