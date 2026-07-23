@@ -31,13 +31,13 @@ import {
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-const STALE_AFTER_MS = 5 * 60_000;
+const STALE_AFTER_MS = 60_000;
 const LEADERBOARD_SIZE = 20;
 
 // Short-lived response cache — leaderboard math over every wallet on
 // every request would hammer KV for nothing.
 let cache: { states: [SocialState, TradesState]; fetchedAt: number } | null = null;
-const CACHE_TTL = 30_000;
+const CACHE_TTL = 10_000;
 
 async function getStates(): Promise<[SocialState, TradesState]> {
   if (cache && Date.now() - cache.fetchedAt < CACHE_TTL) return cache.states;

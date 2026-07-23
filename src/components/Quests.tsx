@@ -73,7 +73,7 @@ export default function Quests() {
 
   useEffect(() => {
     load();
-    const t = setInterval(() => load(), 60_000);
+    const t = setInterval(() => load(), 30_000);
     return () => clearInterval(t);
   }, [load]);
 
