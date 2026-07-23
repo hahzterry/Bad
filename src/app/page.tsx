@@ -14,6 +14,7 @@ import Friends from "@/components/Friends";
 import Tokens from "@/components/Tokens";
 import Stocks from "@/components/Stocks";
 import Communities from "@/components/Communities";
+import Quests from "@/components/Quests";
 import TrendingSidebar from "@/components/TrendingSidebar";
 import AI from "@/components/AI";
 import FloatingAIButton from "@/components/FloatingAIButton";
@@ -123,6 +124,7 @@ export default function Home() {
           {activeTab === "tokens" && <Tokens />}
           {activeTab === "stocks" && <Stocks />}
           {activeTab === "communities" && <Communities />}
+          {activeTab === "quests" && <Quests />}
           {activeTab === "payments" && <Payments />}
           {activeTab === "dashboard" && <CreatorDashboard />}
           {activeTab === "ai" && <AI />}

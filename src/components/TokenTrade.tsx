@@ -208,6 +208,14 @@ export default function TokenTrade({
       const sig = await connection.sendRawTransaction(signed.serialize());
       await pollConfirmation(connection, sig);
 
+      // Report the confirmed swap for season quest points (fire-and-forget —
+      // the server verifies the signature on-chain, nothing here is trusted)
+      fetch("/api/quests/trade", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wallet: publicKey.toBase58(), signature: sig }),
+      }).catch(() => {});
+
       toast("success", `${mode === "buy" ? "Bought" : "Sold"} ${tokenSymbol} successfully! 🎉`);
       setAmount("");
       setQuote(null);

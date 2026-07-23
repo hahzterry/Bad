@@ -1,6 +1,6 @@
 "use client";
 
-import { Newspaper, MessageCircle, Wallet, User, BarChart3, Users, Coins, Globe, CandlestickChart } from "lucide-react";
+import { Newspaper, MessageCircle, Wallet, User, BarChart3, Users, Coins, Globe, CandlestickChart, Flame } from "lucide-react";
 import { useAppStore } from "@/lib/store";
 
 const navItems = [
@@ -8,6 +8,7 @@ const navItems = [
   { id: "chat", label: "Chat", icon: MessageCircle },
   { id: "tokens", label: "Tokens", icon: Coins },
   { id: "stocks", label: "Stocks", icon: CandlestickChart },
+  { id: "quests", label: "Quests", icon: Flame },
   { id: "profile", label: "Me", icon: User },
 ];
 
@@ -29,7 +30,7 @@ export default function MobileNav() {
             <button
               key={item.id}
               onClick={() => handleNavClick(item.id)}
-              className={`touch-active relative flex flex-col items-center justify-center gap-0.5 min-w-[64px] min-h-[52px] py-2 px-3 rounded-xl transition-all duration-200 ${
+              className={`touch-active relative flex flex-col items-center justify-center gap-0.5 min-w-[54px] min-h-[52px] py-2 px-2 rounded-xl transition-all duration-200 ${
                 isActive ? "text-[#2563EB]" : "text-[#94A3B8] active:text-[#64748B]"
               }`}
             >
