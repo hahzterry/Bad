@@ -40,6 +40,60 @@
       "args": []
     },
     {
+      "name": "append_private_message",
+      "docs": [
+        "(ER) Append a message — MUTATES the delegated inbox (ring buffer)."
+      ],
+      "discriminator": [
+        148,
+        126,
+        52,
+        20,
+        251,
+        39,
+        25,
+        7
+      ],
+      "accounts": [
+        {
+          "name": "inbox",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  98,
+                  111,
+                  120
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "sender",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "_chat_id",
+          "type": "u64"
+        },
+        {
+          "name": "content",
+          "type": "string"
+        }
+      ]
+    },
+    {
       "name": "close_chat",
       "docs": [
         "Close a legacy chat account and return rent"
@@ -447,6 +501,63 @@
       "args": [
         {
           "name": "_post_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "close_private_inbox",
+      "docs": [
+        "Close a private inbox and refund its rent to the treasury. Only valid AFTER",
+        "undelegate_private_inbox has returned the account to base layer (a delegated",
+        "account is owned by the delegation program, so this would fail on it)."
+      ],
+      "discriminator": [
+        32,
+        155,
+        221,
+        124,
+        78,
+        164,
+        171,
+        45
+      ],
+      "accounts": [
+        {
+          "name": "inbox",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  98,
+                  111,
+                  120
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "treasury",
+          "writable": true
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "_chat_id",
           "type": "u64"
         }
       ]
@@ -1089,6 +1200,61 @@
       ]
     },
     {
+      "name": "create_private_inbox",
+      "docs": [
+        "(Base) Create the inbox + pre-fund its ephemeral-permission rent."
+      ],
+      "discriminator": [
+        125,
+        48,
+        193,
+        246,
+        22,
+        72,
+        148,
+        21
+      ],
+      "accounts": [
+        {
+          "name": "inbox",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  98,
+                  111,
+                  120
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "chat_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "create_profile",
       "discriminator": [
         225,
@@ -1155,6 +1321,393 @@
         {
           "name": "bio",
           "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "delegate_chat_private",
+      "docs": [
+        "(Base) Delegate the chat PDA to a TEE validator (first remaining account)."
+      ],
+      "discriminator": [
+        61,
+        55,
+        201,
+        63,
+        223,
+        148,
+        144,
+        178
+      ],
+      "accounts": [
+        {
+          "name": "buffer_pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pda"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                196,
+                176,
+                70,
+                209,
+                58,
+                44,
+                29,
+                147,
+                91,
+                38,
+                246,
+                171,
+                162,
+                247,
+                132,
+                39,
+                27,
+                70,
+                133,
+                139,
+                24,
+                180,
+                210,
+                84,
+                165,
+                145,
+                184,
+                252,
+                177,
+                116,
+                83,
+                119
+              ]
+            }
+          }
+        },
+        {
+          "name": "delegation_record_pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pda"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "delegation_program"
+            }
+          }
+        },
+        {
+          "name": "delegation_metadata_pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110,
+                  45,
+                  109,
+                  101,
+                  116,
+                  97,
+                  100,
+                  97,
+                  116,
+                  97
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pda"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "delegation_program"
+            }
+          }
+        },
+        {
+          "name": "pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  97,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "owner_program",
+          "address": "EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ"
+        },
+        {
+          "name": "delegation_program",
+          "address": "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "chat_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "delegate_private_inbox",
+      "docs": [
+        "(Base) Delegate the inbox to a TEE validator (first remaining account)."
+      ],
+      "discriminator": [
+        219,
+        249,
+        215,
+        11,
+        170,
+        232,
+        63,
+        227
+      ],
+      "accounts": [
+        {
+          "name": "buffer_pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pda"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                196,
+                176,
+                70,
+                209,
+                58,
+                44,
+                29,
+                147,
+                91,
+                38,
+                246,
+                171,
+                162,
+                247,
+                132,
+                39,
+                27,
+                70,
+                133,
+                139,
+                24,
+                180,
+                210,
+                84,
+                165,
+                145,
+                184,
+                252,
+                177,
+                116,
+                83,
+                119
+              ]
+            }
+          }
+        },
+        {
+          "name": "delegation_record_pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pda"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "delegation_program"
+            }
+          }
+        },
+        {
+          "name": "delegation_metadata_pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110,
+                  45,
+                  109,
+                  101,
+                  116,
+                  97,
+                  100,
+                  97,
+                  116,
+                  97
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pda"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "delegation_program"
+            }
+          }
+        },
+        {
+          "name": "pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  98,
+                  111,
+                  120
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "owner_program",
+          "address": "EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ"
+        },
+        {
+          "name": "delegation_program",
+          "address": "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "chat_id",
+          "type": "u64"
         }
       ]
     },
@@ -1328,6 +1881,276 @@
         }
       ],
       "args": []
+    },
+    {
+      "name": "fund_chat_permission",
+      "docs": [
+        "Top up the existing chat PDA with enough lamports for its ephemeral permission",
+        "rent, so it can sign/pay when the permission is created on the ER."
+      ],
+      "discriminator": [
+        182,
+        122,
+        212,
+        216,
+        57,
+        216,
+        119,
+        100
+      ],
+      "accounts": [
+        {
+          "name": "chat",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  97,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "_chat_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "init_chat_permission",
+      "docs": [
+        "(ER) Create the EphemeralPermission — `Some(members)` = PRIVATE, locked to those wallets."
+      ],
+      "discriminator": [
+        152,
+        134,
+        22,
+        38,
+        104,
+        30,
+        243,
+        121
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "chat",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  97,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "permission",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  114,
+                  109,
+                  105,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110,
+                  58
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "chat"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "permission_program"
+            }
+          }
+        },
+        {
+          "name": "permission_program",
+          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+        },
+        {
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "chat_id",
+          "type": "u64"
+        },
+        {
+          "name": "members",
+          "type": {
+            "option": {
+              "vec": {
+                "defined": {
+                  "name": "Member"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "init_inbox_permission",
+      "docs": [
+        "(ER) Create the inbox permission — members-only = PRIVATE."
+      ],
+      "discriminator": [
+        149,
+        243,
+        53,
+        121,
+        100,
+        97,
+        150,
+        218
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "inbox",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  98,
+                  111,
+                  120
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "permission",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  114,
+                  109,
+                  105,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110,
+                  58
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "inbox"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "permission_program"
+            }
+          }
+        },
+        {
+          "name": "permission_program",
+          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+        },
+        {
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "chat_id",
+          "type": "u64"
+        },
+        {
+          "name": "members",
+          "type": {
+            "option": {
+              "vec": {
+                "defined": {
+                  "name": "Member"
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     {
       "name": "join_community",
@@ -1731,6 +2554,111 @@
       "args": []
     },
     {
+      "name": "process_undelegation",
+      "discriminator": [
+        196,
+        28,
+        41,
+        206,
+        48,
+        37,
+        51,
+        167
+      ],
+      "accounts": [
+        {
+          "name": "base_account",
+          "writable": true
+        },
+        {
+          "name": "buffer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  110,
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  101,
+                  45,
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "base_account"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                181,
+                183,
+                0,
+                225,
+                242,
+                87,
+                58,
+                192,
+                204,
+                6,
+                34,
+                1,
+                52,
+                74,
+                207,
+                151,
+                184,
+                53,
+                6,
+                235,
+                140,
+                229,
+                25,
+                152,
+                204,
+                98,
+                126,
+                24,
+                147,
+                128,
+                167,
+                62
+              ]
+            }
+          }
+        },
+        {
+          "name": "payer",
+          "writable": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "account_seeds",
+          "type": {
+            "vec": "bytes"
+          }
+        }
+      ]
+    },
+    {
       "name": "react_to_post",
       "discriminator": [
         186,
@@ -1956,6 +2884,80 @@
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "undelegate_chat",
+      "docs": [
+        "(ER) Commit chat state to Solana and return control of the chat PDA so it can be closed."
+      ],
+      "discriminator": [
+        150,
+        177,
+        226,
+        150,
+        17,
+        196,
+        118,
+        173
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "chat",
+          "writable": true
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        },
+        {
+          "name": "magic_context",
+          "writable": true,
+          "address": "MagicContext1111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "undelegate_private_inbox",
+      "docs": [
+        "(ER) Commit inbox state back to Solana."
+      ],
+      "discriminator": [
+        227,
+        220,
+        161,
+        64,
+        188,
+        126,
+        166,
+        176
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "inbox",
+          "writable": true
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        },
+        {
+          "name": "magic_context",
+          "writable": true,
+          "address": "MagicContext1111111111111111111111111111111"
+        }
+      ],
+      "args": []
     },
     {
       "name": "unfollow_user",
@@ -2453,6 +3455,19 @@
       ]
     },
     {
+      "name": "PrivateInbox",
+      "discriminator": [
+        158,
+        170,
+        6,
+        130,
+        205,
+        7,
+        3,
+        77
+      ]
+    },
+    {
       "name": "Profile",
       "discriminator": [
         184,
@@ -2661,6 +3676,26 @@
       }
     },
     {
+      "name": "InboxMsg",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sender",
+            "type": "pubkey"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          },
+          {
+            "name": "content",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
       "name": "LikeRecord",
       "type": {
         "kind": "struct",
@@ -2676,6 +3711,25 @@
           {
             "name": "liked_at",
             "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Member",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "flags",
+            "type": "u8"
+          },
+          {
+            "name": "pubkey",
+            "type": "pubkey"
           }
         ]
       }
@@ -2873,6 +3927,32 @@
       }
     },
     {
+      "name": "PrivateInbox",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "chat_id",
+            "type": "u64"
+          },
+          {
+            "name": "total",
+            "type": "u64"
+          },
+          {
+            "name": "messages",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "InboxMsg"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
       "name": "Profile",
       "type": {
         "kind": "struct",
@@ -2923,10 +4003,6 @@
           },
           {
             "name": "banner_url",
-            "type": "string"
-          },
-          {
-            "name": "website_url",
             "type": "string"
           }
         ]

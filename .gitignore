@@ -36,3 +36,10 @@ test-priority-real.ts
 test-real-full-audit.ts
 test-real-tampering.ts
 .env*.local
+
+# Local Claude config (not for the repo)
+.claude/
+
+# One-off admin/setup scripts (kept local, not pushed)
+/close-messages.ts
+/scripts/

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode, type SyntheticEvent } from "react";
 import { ExternalLink, Play, X } from "lucide-react";
 import { useAppStore } from "@/lib/store";
 
@@ -152,15 +152,46 @@ const VIDEO_EXTS = /\.(mp4|webm|ogg|mov)(\?.*)?$/i;
 /* ── IPFS URLs (Pinata, etc.) ── */
 const IPFS_URL = /\.mypinata\.cloud\/ipfs\/|ipfs\.io\/ipfs\/|cloudflare-ipfs\.com\/ipfs\/|gateway\.pinata\.cloud\/ipfs\//i;
 
-/** Rewrite any IPFS gateway URL to dedicated Pinata gateway to avoid rate limits */
+/** Rewrite any IPFS gateway URL to the dedicated Pinata gateway to avoid the
+ *  shared gateway.pinata.cloud rate limits (429s that hide media from users). */
+const DEDICATED_IPFS_GATEWAY =
+  process.env.NEXT_PUBLIC_PINATA_GATEWAY || "amethyst-secondary-orca-737.mypinata.cloud";
 function normalizeIpfsUrl(url: string): string {
   const match = url.match(/\/ipfs\/([a-zA-Z0-9]+)(\/[^?#]*)?(\?.*)?$/i);
   if (match) {
     const cid = match[1];
     const path = match[2] || "";
-    return `https://gateway.pinata.cloud/ipfs/${cid}`;
+    return `https://${DEDICATED_IPFS_GATEWAY}/ipfs/${cid}${path}`;
   }
   return url;
+}
+/** Ordered gateway fallbacks for an IPFS URL. The dedicated gateway is tried
+ *  first (fast, no rate limits, serves our pinned content); public gateways
+ *  follow so posts whose CIDs aren't in our Pinata account (old/orphaned/
+ *  external uploads) still load instead of 403/404/429-ing. */
+export function ipfsGatewayChain(url: string): string[] {
+  const match = url.match(/\/ipfs\/([a-zA-Z0-9]+)(\/[^?#]*)?(\?.*)?$/i);
+  if (!match) return [url];
+  const cid = match[1];
+  const path = match[2] || "";
+  return [
+    `https://${DEDICATED_IPFS_GATEWAY}/ipfs/${cid}${path}`,
+    `https://ipfs.io/ipfs/${cid}${path}`,
+    `https://dweb.link/ipfs/${cid}${path}`,
+  ];
+}
+
+/** Drop-in onError handler for any <img> whose src is an IPFS gateway URL.
+ *  Advances through the gateway fallback chain so orphaned CIDs (not pinned to
+ *  our account, which 403 on the dedicated gateway) still load from a public
+ *  gateway. Attach as onError={handleIpfsImgError}. */
+export function handleIpfsImgError(e: SyntheticEvent<HTMLImageElement, Event>) {
+  const img = e.currentTarget;
+  const chain = ipfsGatewayChain(img.src);
+  if (chain.length <= 1) return; // not an IPFS URL — nothing to fall back to
+  const idx = chain.indexOf(img.src);
+  const next = idx === -1 ? 1 : idx + 1;
+  if (next < chain.length) img.src = chain[next];
 }
 /** IPFS URLs that are NOT videos — treat as images */
 const IPFS_IMAGE_URL = { test: (u: string) => IPFS_URL.test(u) && !VIDEO_EXTS.test(u) };
@@ -299,14 +330,7 @@ export function RichContent({ content, className = "" }: RichContentProps) {
 
       {/* Video previews */}
       {videoUrls.map((url, i) => (
-        <div key={i} className="mt-3 rounded-2xl overflow-hidden border border-[#E2E8F0]">
-          <video
-            src={IPFS_URL.test(url) ? normalizeIpfsUrl(url) : url}
-            controls
-            preload="metadata"
-            className="w-full max-h-[280px] sm:max-h-[400px] object-contain bg-black"
-          />
-        </div>
+        <VideoPreview key={i} url={IPFS_URL.test(url) ? normalizeIpfsUrl(url) : url} />
       ))}
 
       {/* Link previews (for non-image, non-video URLs) */}
@@ -321,12 +345,25 @@ export function RichContent({ content, className = "" }: RichContentProps) {
 function ImagePreview({ url, single }: { url: string; single: boolean }) {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
+  const [gwIdx, setGwIdx] = useState(0);
+
+  const chain = ipfsGatewayChain(url);
+  const src = chain[Math.min(gwIdx, chain.length - 1)];
+
+  const handleError = () => {
+    // Try the next gateway before giving up (covers 403/404/429 on any host).
+    if (gwIdx < chain.length - 1) {
+      setGwIdx((i) => i + 1);
+    } else {
+      setError(true);
+    }
+  };
 
   if (error) return null;
 
   return (
     <a
-      href={url}
+      href={src}
       target="_blank"
       rel="noopener noreferrer"
       className="block relative bg-[#F1F5F9] cursor-pointer hover:opacity-95 transition-opacity"
@@ -336,15 +373,39 @@ function ImagePreview({ url, single }: { url: string; single: boolean }) {
         <div className={`${single ? "h-[220px] sm:h-[300px]" : "h-[160px] sm:h-[200px]"} animate-pulse bg-[#E2E8F0]`} />
       )}
       <img
-        src={url}
+        src={src}
         alt=""
         onLoad={() => setLoaded(true)}
-        onError={() => setError(true)}
+        onError={handleError}
         className={`w-full object-cover ${
           single ? "max-h-[320px] sm:max-h-[500px]" : "h-[160px] sm:h-[200px]"
         } ${loaded ? "" : "hidden"}`}
       />
     </a>
+  );
+}
+
+/* ═══ Video Preview ═══ */
+function VideoPreview({ url }: { url: string }) {
+  const [gwIdx, setGwIdx] = useState(0);
+  const chain = ipfsGatewayChain(url);
+  const src = chain[Math.min(gwIdx, chain.length - 1)];
+
+  const handleError = () => {
+    if (gwIdx < chain.length - 1) setGwIdx((i) => i + 1);
+  };
+
+  return (
+    <div className="mt-3 rounded-2xl overflow-hidden border border-[#E2E8F0]">
+      <video
+        key={src}
+        src={src}
+        controls
+        preload="metadata"
+        onError={handleError}
+        className="w-full max-h-[280px] sm:max-h-[400px] object-contain bg-black"
+      />
+    </div>
   );
 }
 

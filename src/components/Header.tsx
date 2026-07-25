@@ -5,6 +5,7 @@ import { useWallet } from "@/hooks/usePrivyWallet";
 import { getChainPreference } from "@/components/ChainSelector";
 import { useAppStore, AppNotification } from "@/lib/store";
 import { useProgram } from "@/hooks/useProgram";
+import { handleIpfsImgError } from "@/components/RichContent";
 import { useEffect, useState, useRef } from "react";
 import ProfileSetup from "@/components/ProfileSetup";
 import { useNotifications } from "@/hooks/useNotifications";
@@ -243,7 +244,7 @@ export default function Header() {
                               className="flex-shrink-0 mt-0.5 cursor-pointer"
                             >
                               {n.actorAvatarUrl ? (
-                                <img src={n.actorAvatarUrl} alt="" className="w-9 h-9 rounded-full object-cover border border-[#E2E8F0]" />
+                                <img src={n.actorAvatarUrl} onError={handleIpfsImgError} alt="" className="w-9 h-9 rounded-full object-cover border border-[#E2E8F0]" />
                               ) : (
                                 <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[#EBF4FF] to-[#E0F2FE] flex items-center justify-center text-sm border border-[#E2E8F0]">
                                   {n.type === "tip" ? "💸" : (n.actorName?.charAt(0)?.toUpperCase() || notifIcon(n.type))}

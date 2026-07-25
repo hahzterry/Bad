@@ -5,9 +5,21 @@ import {
   PublicKey,
   Transaction,
   SystemProgram,
+  ComputeBudgetProgram,
 } from "@solana/web3.js";
 import { Program, AnchorProvider, Idl, BN } from "@coral-xyz/anchor";
 import idl from "@/lib/idl.json";
+import {
+  DELEGATION_PROGRAM_ID,
+  MAGIC_PROGRAM_ID,
+  MAGIC_CONTEXT_ID,
+  delegationRecordPdaFromDelegatedAccount,
+  delegationMetadataPdaFromDelegatedAccount,
+  delegateBufferPdaFromDelegatedAccountAndOwnerProgram,
+} from "@magicblock-labs/ephemeral-rollups-sdk";
+
+// MagicBlock TEE validator (mainnet, private ER).
+const TEE_VALIDATOR = new PublicKey("MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo");
 
 /**
  * /api/build-tx — Server builds the ENTIRE transaction from action + params.
@@ -59,6 +71,9 @@ function getLikeRecordPda(postPda: PublicKey, liker: PublicKey): [PublicKey, num
 }
 function getChatPda(chatId: number): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([CHAT_SEED, toLEBytes(chatId)], PROGRAM_ID);
+}
+function getInboxPda(chatId: number): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("inbox"), toLEBytes(chatId)], PROGRAM_ID);
 }
 function getMessagePda(chatId: number, messageIndex: number): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([MESSAGE_SEED, toLEBytes(chatId), toLEBytes(messageIndex)], PROGRAM_ID);
@@ -342,6 +357,61 @@ const actions: Record<string, ActionHandler> = {
       .instruction();
   },
 
+  // ── Private chat (MagicBlock TEE), base-layer legs — treasury-sponsored ──
+  // INBOX model: create_private_inbox → delegate_private_inbox (base, treasury-
+  // sponsored). init permission + append/read happen on the ER, client-side.
+  async createPrivateInbox(params, user, treasury, program) {
+    const { chatId } = params;
+    if (chatId === undefined) throw new Error("Missing chatId");
+    const [inboxPda] = getInboxPda(chatId);
+    return program.methods
+      .createPrivateInbox(new BN(chatId))
+      .accounts({ inbox: inboxPda, payer: treasury, systemProgram: SystemProgram.programId })
+      .instruction();
+  },
+
+  async delegatePrivateInbox(params, user, treasury, program) {
+    const { chatId } = params;
+    if (chatId === undefined) throw new Error("Missing chatId");
+    const [inboxPda] = getInboxPda(chatId);
+    return program.methods
+      .delegatePrivateInbox(new BN(chatId))
+      .accounts({
+        bufferPda: delegateBufferPdaFromDelegatedAccountAndOwnerProgram(inboxPda, PROGRAM_ID),
+        delegationRecordPda: delegationRecordPdaFromDelegatedAccount(inboxPda),
+        delegationMetadataPda: delegationMetadataPdaFromDelegatedAccount(inboxPda),
+        pda: inboxPda,
+        payer: treasury,
+        ownerProgram: PROGRAM_ID,
+        delegationProgram: DELEGATION_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .remainingAccounts([{ pubkey: TEE_VALIDATOR, isSigner: false, isWritable: false }])
+      .instruction();
+  },
+
+  async undelegatePrivateInbox(params, user, treasury, program) {
+    const { chatId } = params;
+    if (chatId === undefined) throw new Error("Missing chatId");
+    const [inboxPda] = getInboxPda(chatId);
+    return program.methods
+      .undelegatePrivateInbox()
+      .accounts({ payer: treasury, inbox: inboxPda, magicProgram: MAGIC_PROGRAM_ID, magicContext: MAGIC_CONTEXT_ID })
+      .instruction();
+  },
+
+  // Close an UNDELEGATED inbox and refund its rent to the treasury. Must run only
+  // after undelegation has returned the account to the base chain.
+  async closePrivateInbox(params, user, treasury, program) {
+    const { chatId } = params;
+    if (chatId === undefined) throw new Error("Missing chatId");
+    const [inboxPda] = getInboxPda(chatId);
+    return program.methods
+      .closePrivateInbox(new BN(chatId))
+      .accounts({ inbox: inboxPda, treasury, payer: treasury })
+      .instruction();
+  },
+
   async closeChat(params, user, treasury, program) {
     const { chatId } = params;
     if (chatId === undefined) throw new Error("Missing chatId");
@@ -595,6 +665,11 @@ export async function POST(request: NextRequest) {
 
     // ── 6. BUILD TX ──
     const tx = new Transaction();
+    // Give the program the max heap (256KB). The program's memory footprint grew
+    // after the private-messaging upgrade; the default 32KB heap OOMs on some
+    // instructions (e.g. likePost). This restores them with no program redeploy.
+    tx.add(ComputeBudgetProgram.requestHeapFrame({ bytes: 256 * 1024 }));
+    tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }));
     for (const ix of ixs) tx.add(ix);
     tx.feePayer = treasury.publicKey;
 

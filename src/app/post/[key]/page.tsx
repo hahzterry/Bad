@@ -23,11 +23,13 @@ function getPostPda(author: PublicKey, postId: number): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([POST_SEED, author.toBuffer(), toLEBytes(postId)], PROGRAM_ID);
 }
 
+const IPFS_GATEWAY =
+  (process.env.PINATA_GATEWAY || process.env.NEXT_PUBLIC_PINATA_GATEWAY || "amethyst-secondary-orca-737.mypinata.cloud").trim();
 function expandIpfs(content: string): string {
   if (!content) return "";
   return content.replace(
     /\b(Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[a-zA-Z0-9]{50,})\b/g,
-    (cid) => `https://gateway.pinata.cloud/ipfs/${cid}`
+    (cid) => `https://${IPFS_GATEWAY}/ipfs/${cid}`
   );
 }
 

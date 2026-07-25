@@ -17,7 +17,11 @@ const PROGRAM_ID = new PublicKey("EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ")
 // ========== IPFS URL Helpers ==========
 // On-chain fields are limited to 128 bytes. Full IPFS URLs can be 130+ chars.
 // We store only the CID on-chain and reconstruct the full URL client-side.
-const IPFS_GATEWAY = "gateway.pinata.cloud";
+// Use the dedicated Pinata gateway (paid, no shared rate limits). The shared
+// gateway.pinata.cloud is aggressively rate-limited (429s) so media fails to
+// load for some users under load.
+const IPFS_GATEWAY =
+  process.env.NEXT_PUBLIC_PINATA_GATEWAY || "amethyst-secondary-orca-737.mypinata.cloud";
 const IPFS_CID_REGEX = /\/ipfs\/([a-zA-Z0-9]+)(\/[^?#]*)?(\?.*)?$/;
 
 /** Strip a full IPFS URL down to just the CID (for on-chain storage). */
@@ -37,13 +41,13 @@ function expandIpfsUrl(stored: string): string {
     if (cidMatch) {
       const cid = cidMatch[1];
       const path = cidMatch[2] || "";
-      return `https://gateway.pinata.cloud/ipfs/${cid}`;
+      return `https://${IPFS_GATEWAY}/ipfs/${cid}${path}`;
     }
     return stored;
   }
   // Looks like a bare CID (bafkrei... or Qm...)
   if (stored.startsWith("baf") || stored.startsWith("Qm")) {
-    return `https://gateway.pinata.cloud/ipfs/${stored}`;
+    return `https://${IPFS_GATEWAY}/ipfs/${stored}`;
   }
   return stored;
 }
@@ -731,6 +735,44 @@ export class ShyftClient {
   async createChat(chatId: number, user2: PublicKey): Promise<string> {
     const sig = await requestServerTx("createChat", { chatId, user2: user2.toBase58() }, this.provider.wallet, this.provider.connection);
     return sig;
+  }
+
+  /**
+   * Make an existing chat PRIVATE (MagicBlock TEE) — base-layer legs only.
+   * Runs fund_chat_permission then delegate_chat_private (both treasury-sponsored).
+   * After this confirms, call initChatPermission() (see src/lib/privateChat.ts)
+   * to lock read/write to the two members on the ER.
+   */
+  async enablePrivateInbox(chatId: number): Promise<{ createSig: string; delegateSig: string }> {
+    const createSig = await requestServerTx("createPrivateInbox", { chatId }, this.provider.wallet, this.provider.connection);
+    const delegateSig = await requestServerTx("delegatePrivateInbox", { chatId }, this.provider.wallet, this.provider.connection);
+    return { createSig, delegateSig };
+  }
+
+  /** Bring a private inbox's state back to Solana (treasury-sponsored). */
+  async undelegatePrivateInbox(chatId: number): Promise<string> {
+    return requestServerTx("undelegatePrivateInbox", { chatId }, this.provider.wallet, this.provider.connection);
+  }
+
+  /**
+   * Delete a private (MagicBlock TEE) chat and refund its rent to the treasury.
+   * Two steps: undelegate (ER-side, member-signed) → wait for base-layer return →
+   * close (treasury-sponsored). Pass teeSign (wallet.signMessage) for the TEE auth.
+   */
+  async deletePrivateChat(
+    chatId: number,
+    teeSign: (m: Uint8Array) => Promise<Uint8Array>,
+    onStep?: (s: string) => void
+  ): Promise<{ closeSig: string }> {
+    const { undelegateInbox, waitForUndelegation } = await import("@/lib/privateChat");
+    onStep?.("Undelegating from the TEE…");
+    await undelegateInbox(chatId, this.provider.wallet as any, teeSign);
+    onStep?.("Returning to Solana…");
+    const back = await waitForUndelegation(chatId, this.provider.connection);
+    if (!back) throw new Error("Undelegation didn't land in time — try delete again in a moment");
+    onStep?.("Closing & refunding rent…");
+    const closeSig = await requestServerTx("closePrivateInbox", { chatId }, this.provider.wallet, this.provider.connection);
+    return { closeSig };
   }
 
   async sendMessage(

@@ -22,3 +22,8 @@ anchor-debug = []
 [dependencies]
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
 blake3 = "=1.5.5"
+# Private messaging (MagicBlock TEE / Private Ephemeral Rollups).
+# NOTE: 0.16.2 pulls Solana 3.x crates → this program now requires the
+# Solana 3.x build toolchain (platform-tools v1.52+, Rust 1.85+). Build with
+# `agave-install init 3.1.9` first. anchor-compat keeps Anchor 0.32.1.
+ephemeral-rollups-sdk = { version = "0.16.2", features = ["anchor-compat", "access-control"] }

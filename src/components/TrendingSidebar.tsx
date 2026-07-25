@@ -5,6 +5,7 @@ import { TrendingUp, Heart, MessageCircle, Flame, Users } from "lucide-react";
 import { useProgram } from "@/hooks/useProgram";
 import { useWallet } from "@/hooks/usePrivyWallet";
 import ProfileHoverCard from "@/components/ProfileHoverCard";
+import { handleIpfsImgError } from "@/components/RichContent";
 import { useAppStore } from "@/lib/store";
 
 /** Parse paid post prefix */
@@ -215,7 +216,7 @@ export default function TrendingSidebar() {
                 >
                   <div className="flex items-center gap-2.5">
                     {creator.avatarUrl ? (
-                      <img src={creator.avatarUrl} alt="" className="w-8 h-8 rounded-full object-cover flex-shrink-0" />
+                      <img src={creator.avatarUrl} onError={handleIpfsImgError} alt="" className="w-8 h-8 rounded-full object-cover flex-shrink-0" />
                     ) : (
                       <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#EBF4FF] to-[#DBEAFE] flex items-center justify-center text-xs font-bold text-[#2563EB] flex-shrink-0">
                         {(creator.displayName || creator.username || "?").charAt(0).toUpperCase()}

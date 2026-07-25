@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import { BadgeCheck } from "lucide-react";
+import { handleIpfsImgError } from "@/components/RichContent";
 import { useAppStore } from "@/lib/store";
 
 const GOLD_BADGE_USERNAMES = ["shaan", "shyft"];
@@ -103,6 +104,7 @@ export default function ProfileHoverCard({ walletAddress, profile, children, wra
               {profile.avatarUrl ? (
                 <img
                   src={profile.avatarUrl}
+                  onError={handleIpfsImgError}
                   alt={displayName}
                   className="w-14 h-14 rounded-full object-cover border-2 border-white shadow-sm hover:ring-2 hover:ring-[#2563EB]/30 transition-all"
                 />

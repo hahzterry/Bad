@@ -62,7 +62,7 @@ ShyftClient (src/lib/program.ts)
 Treasury Sponsorship API    Bags SDK (Mainnet)
   /api/sponsor-tx              Token launch, trade, earnings
     ↓                           ↓
-Solana Devnet               Solana Mainnet
+Solana Mainnet               Solana Mainnet
   Anchor Program               Bags Protocol
 ```
 
@@ -70,7 +70,7 @@ Solana Devnet               Solana Mainnet
 |-------|-----------|
 | Frontend | Next.js 16, React 19, Tailwind CSS 4, Zustand |
 | Auth | Privy embedded wallets (Twitter OAuth, email, Google) |
-| On-chain Program | Rust / Anchor, deployed on Solana Devnet |
+| On-chain Program | Rust / Anchor, deployed on Solana Mainnet |
 | Encryption | NaCl Box via tweetnacl (X25519 + XSalsa20-Poly1305) |
 | Creator Tokens | @bagsfm/bags-sdk on Solana Mainnet |
 | RPC | Helius |
@@ -221,7 +221,7 @@ Add every variable from `.env.example` to your Vercel project's **Environment Va
 
 | | |
 |---|---|
-| **Blockchain** | Solana (Devnet for social, Mainnet for tokens) |
+| **Blockchain** | Solana Mainnet (social + tokens) |
 | **Smart Contracts** | Rust, Anchor Framework |
 | **Frontend** | Next.js 16, React 19, TypeScript, Tailwind CSS 4 |
 | **Auth** | Privy (Twitter OAuth, email, Google, embedded wallets) |
@@ -237,7 +237,7 @@ Add every variable from `.env.example` to your Vercel project's **Environment Va
 
 - **Live:** [shyft.lol](https://www.shyft.lol)
 - **X:** [@Shyft_lol](https://x.com/Shyft_lol)
-- **Program:** [`EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ`](https://explorer.solana.com/address/EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ?cluster=devnet)
+- **Program:** [`EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ`](https://explorer.solana.com/address/EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ)
 
 ---
 

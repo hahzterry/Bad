@@ -1,4 +1,12 @@
 use anchor_lang::prelude::*;
+// ── Private messaging (MagicBlock TEE / Private Ephemeral Rollups) ──
+use anchor_lang::system_program::{transfer, Transfer};
+use ephemeral_rollups_sdk::access_control::instructions::CreateEphemeralPermissionCpi;
+use ephemeral_rollups_sdk::access_control::structs::{EphemeralMembersArgs, EphemeralPermission, Member, PERMISSION_SEED};
+use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
+use ephemeral_rollups_sdk::consts::{EPHEMERAL_VAULT_ID, MAGIC_PROGRAM_ID, PERMISSION_PROGRAM_ID};
+use ephemeral_rollups_sdk::cpi::DelegateConfig;
+use ephemeral_rollups_sdk::ephem::commit_and_undelegate_accounts;
 
 declare_id!("EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ");
 
@@ -18,6 +26,17 @@ pub const LIKE_SEED: &[u8] = b"like";
 /// Hardcoded treasury wallet — ALL rent refunds MUST go here.
 pub const TREASURY_PUBKEY: Pubkey = pubkey!("4tpjCdXS1fKiYoBYLvTNNyHwzTAhuigB3TY6Wd2QbxT9");
 
+/// Max members on a private-chat permission (the 2 participants; capped for rent).
+pub const MAX_PERMISSION_MEMBERS: usize = 4;
+
+// Private inbox (MagicBlock TEE) — a fixed-size delegated ring buffer of recent
+// messages. Appending MUTATES the delegated account (works in the ER), unlike
+// creating a new account per message (which the rollup rejects).
+pub const INBOX_SEED: &[u8] = b"inbox";
+pub const INBOX_CAP: usize = 30;        // recent messages kept
+pub const INBOX_MSG_MAX: usize = 200;   // max content bytes per message
+
+#[ephemeral]
 #[program]
 pub mod shadowspace {
     use super::*;
@@ -77,7 +96,7 @@ pub mod shadowspace {
         profile.bio = bio;
         profile.avatar_url = avatar_url;
         profile.banner_url = banner_url;
-        profile.website_url = website_url;
+        let _ = website_url;
         msg!("Profile updated for {}", profile.owner);
         Ok(())
     }
@@ -432,6 +451,163 @@ pub mod shadowspace {
     /// Close a legacy message account and return rent
     pub fn close_message(_ctx: Context<CloseMessage>, _chat_id: u64, _message_index: u64) -> Result<()> {
         msg!("Message closed");
+        Ok(())
+    }
+
+    // ========== PRIVATE MESSAGING (MagicBlock TEE) ==========
+    // Flow: create_chat (existing) -> fund_chat_permission -> delegate_chat_private
+    //       -> init_chat_permission (on ER, members-only) -> send_message runs
+    //       privately in the TEE -> undelegate_chat -> (admin_force_close reclaims
+    //       rent to the admin wallet, exactly like the message cleanup script).
+
+    /// Top up the existing chat PDA with enough lamports for its ephemeral permission
+    /// rent, so it can sign/pay when the permission is created on the ER.
+    pub fn fund_chat_permission(ctx: Context<FundChatPermission>, _chat_id: u64) -> Result<()> {
+        transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer { from: ctx.accounts.payer.to_account_info(), to: ctx.accounts.chat.to_account_info() },
+            ),
+            ephemeral_rollups_sdk::ephemeral_accounts::rent(
+                EphemeralPermission::size_of(MAX_PERMISSION_MEMBERS) as u32,
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// (Base) Delegate the chat PDA to a TEE validator (first remaining account).
+    pub fn delegate_chat_private(ctx: Context<DelegateChatPrivate>, chat_id: u64) -> Result<()> {
+        let cid = chat_id.to_le_bytes();
+        let validator = ctx.remaining_accounts.first().map(|v| v.key());
+        ctx.accounts.delegate_pda(
+            &ctx.accounts.payer,
+            &[CHAT_SEED, &cid],
+            DelegateConfig { validator, ..Default::default() },
+        )?;
+        Ok(())
+    }
+
+    /// (ER) Create the EphemeralPermission — `Some(members)` = PRIVATE, locked to those wallets.
+    pub fn init_chat_permission(ctx: Context<ChatPermissionContext>, chat_id: u64, members: Option<Vec<Member>>) -> Result<()> {
+        let (is_private, members) = match members { Some(m) => (true, m), None => (false, vec![]) };
+        require!(members.len() <= MAX_PERMISSION_MEMBERS, ShadowError::ContentTooLong);
+        if ctx.accounts.permission.owner == &PERMISSION_PROGRAM_ID && !ctx.accounts.permission.data_is_empty() {
+            return Ok(());
+        }
+        let cid = chat_id.to_le_bytes();
+        let signer_seeds: &[&[u8]] = &[CHAT_SEED, &cid, std::slice::from_ref(&ctx.bumps.chat)];
+        CreateEphemeralPermissionCpi {
+            payer: ctx.accounts.chat.to_account_info(),
+            permissioned_account: ctx.accounts.chat.to_account_info(),
+            permission: ctx.accounts.permission.to_account_info(),
+            vault: ctx.accounts.ephemeral_vault.to_account_info(),
+            magic_program: ctx.accounts.magic_program.to_account_info(),
+            permission_program: ctx.accounts.permission_program.to_account_info(),
+            args: EphemeralMembersArgs { is_private, members },
+        }
+        .invoke_signed(&[signer_seeds])?;
+        Ok(())
+    }
+
+    /// (ER) Commit chat state to Solana and return control of the chat PDA so it can be closed.
+    pub fn undelegate_chat(ctx: Context<UndelegateChat>) -> Result<()> {
+        commit_and_undelegate_accounts(
+            &ctx.accounts.payer,
+            vec![&ctx.accounts.chat.to_account_info()],
+            &ctx.accounts.magic_context,
+            &ctx.accounts.magic_program,
+            None,
+        )?;
+        Ok(())
+    }
+
+    // ========== PRIVATE INBOX (MagicBlock TEE — the working model) ==========
+    // Messages append to a delegated ring-buffer account (mutation works in the ER).
+
+    /// (Base) Create the inbox + pre-fund its ephemeral-permission rent.
+    pub fn create_private_inbox(ctx: Context<CreatePrivateInbox>, chat_id: u64) -> Result<()> {
+        transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer { from: ctx.accounts.payer.to_account_info(), to: ctx.accounts.inbox.to_account_info() },
+            ),
+            ephemeral_rollups_sdk::ephemeral_accounts::rent(
+                EphemeralPermission::size_of(MAX_PERMISSION_MEMBERS) as u32,
+            ),
+        )?;
+        let inbox = &mut ctx.accounts.inbox;
+        inbox.chat_id = chat_id;
+        inbox.total = 0;
+        inbox.messages = Vec::new();
+        Ok(())
+    }
+
+    /// (Base) Delegate the inbox to a TEE validator (first remaining account).
+    pub fn delegate_private_inbox(ctx: Context<DelegatePrivateInbox>, chat_id: u64) -> Result<()> {
+        let cid = chat_id.to_le_bytes();
+        let validator = ctx.remaining_accounts.first().map(|v| v.key());
+        ctx.accounts.delegate_pda(
+            &ctx.accounts.payer,
+            &[INBOX_SEED, &cid],
+            DelegateConfig { validator, ..Default::default() },
+        )?;
+        Ok(())
+    }
+
+    /// (ER) Create the inbox permission — members-only = PRIVATE.
+    pub fn init_inbox_permission(ctx: Context<InboxPermissionContext>, chat_id: u64, members: Option<Vec<Member>>) -> Result<()> {
+        let (is_private, members) = match members { Some(m) => (true, m), None => (false, vec![]) };
+        require!(members.len() <= MAX_PERMISSION_MEMBERS, ShadowError::ContentTooLong);
+        if ctx.accounts.permission.owner == &PERMISSION_PROGRAM_ID && !ctx.accounts.permission.data_is_empty() {
+            return Ok(());
+        }
+        let cid = chat_id.to_le_bytes();
+        let signer_seeds: &[&[u8]] = &[INBOX_SEED, &cid, std::slice::from_ref(&ctx.bumps.inbox)];
+        CreateEphemeralPermissionCpi {
+            payer: ctx.accounts.inbox.to_account_info(),
+            permissioned_account: ctx.accounts.inbox.to_account_info(),
+            permission: ctx.accounts.permission.to_account_info(),
+            vault: ctx.accounts.ephemeral_vault.to_account_info(),
+            magic_program: ctx.accounts.magic_program.to_account_info(),
+            permission_program: ctx.accounts.permission_program.to_account_info(),
+            args: EphemeralMembersArgs { is_private, members },
+        }
+        .invoke_signed(&[signer_seeds])?;
+        Ok(())
+    }
+
+    /// (ER) Append a message — MUTATES the delegated inbox (ring buffer).
+    pub fn append_private_message(ctx: Context<AppendPrivateMessage>, _chat_id: u64, content: String) -> Result<()> {
+        require!(content.len() <= INBOX_MSG_MAX, ShadowError::ContentTooLong);
+        let inbox = &mut ctx.accounts.inbox;
+        let msg = InboxMsg { sender: ctx.accounts.sender.key(), ts: Clock::get()?.unix_timestamp, content };
+        if inbox.messages.len() < INBOX_CAP {
+            inbox.messages.push(msg);
+        } else {
+            let i = (inbox.total as usize) % INBOX_CAP;
+            inbox.messages[i] = msg;
+        }
+        inbox.total = inbox.total.saturating_add(1);
+        Ok(())
+    }
+
+    /// (ER) Commit inbox state back to Solana.
+    pub fn undelegate_private_inbox(ctx: Context<UndelegatePrivateInbox>) -> Result<()> {
+        commit_and_undelegate_accounts(
+            &ctx.accounts.payer,
+            vec![&ctx.accounts.inbox.to_account_info()],
+            &ctx.accounts.magic_context,
+            &ctx.accounts.magic_program,
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Close a private inbox and refund its rent to the treasury. Only valid AFTER
+    /// undelegate_private_inbox has returned the account to base layer (a delegated
+    /// account is owned by the delegation program, so this would fail on it).
+    pub fn close_private_inbox(_ctx: Context<ClosePrivateInbox>, _chat_id: u64) -> Result<()> {
+        msg!("Private inbox closed, rent refunded to treasury");
         Ok(())
     }
 
@@ -836,6 +1012,156 @@ pub struct CloseMessage<'info> {
     pub treasury: AccountInfo<'info>,
 }
 
+// ========== PRIVATE MESSAGING CONTEXTS (MagicBlock TEE) ==========
+
+#[derive(Accounts)]
+#[instruction(chat_id: u64)]
+pub struct FundChatPermission<'info> {
+    #[account(mut, seeds = [CHAT_SEED, &chat_id.to_le_bytes()], bump)]
+    pub chat: Account<'info, Chat>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[delegate]
+#[derive(Accounts)]
+#[instruction(chat_id: u64)]
+pub struct DelegateChatPrivate<'info> {
+    /// CHECK: chat PDA being delegated
+    #[account(mut, del, seeds = [CHAT_SEED, &chat_id.to_le_bytes()], bump)]
+    pub pda: AccountInfo<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+}
+
+/// Shared ER-side context for the chat's ephemeral permission.
+#[derive(Accounts)]
+#[instruction(chat_id: u64)]
+pub struct ChatPermissionContext<'info> {
+    #[account(mut, constraint = (authority.key() == chat.user1 || authority.key() == chat.user2) @ ShadowError::Unauthorized)]
+    pub authority: Signer<'info>,
+    #[account(mut, seeds = [CHAT_SEED, &chat_id.to_le_bytes()], bump)]
+    pub chat: Account<'info, Chat>,
+    /// CHECK: permission PDA under the permission program
+    #[account(mut, seeds = [PERMISSION_SEED, chat.key().as_ref()], bump, seeds::program = permission_program.key())]
+    pub permission: UncheckedAccount<'info>,
+    /// CHECK: MagicBlock permission program
+    #[account(address = PERMISSION_PROGRAM_ID)]
+    pub permission_program: UncheckedAccount<'info>,
+    /// CHECK: ephemeral vault
+    #[account(mut, address = EPHEMERAL_VAULT_ID)]
+    pub ephemeral_vault: UncheckedAccount<'info>,
+    /// CHECK: magic program
+    #[account(address = MAGIC_PROGRAM_ID)]
+    pub magic_program: UncheckedAccount<'info>,
+}
+
+#[commit]
+#[derive(Accounts)]
+pub struct UndelegateChat<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: chat account to undelegate
+    #[account(mut)]
+    pub chat: UncheckedAccount<'info>,
+}
+
+// ========== PRIVATE INBOX CONTEXTS ==========
+
+#[derive(Accounts)]
+#[instruction(chat_id: u64)]
+pub struct CreatePrivateInbox<'info> {
+    #[account(init, payer = payer, space = 8 + PrivateInbox::LEN, seeds = [INBOX_SEED, &chat_id.to_le_bytes()], bump)]
+    pub inbox: Account<'info, PrivateInbox>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[delegate]
+#[derive(Accounts)]
+#[instruction(chat_id: u64)]
+pub struct DelegatePrivateInbox<'info> {
+    /// CHECK: inbox PDA being delegated
+    #[account(mut, del, seeds = [INBOX_SEED, &chat_id.to_le_bytes()], bump)]
+    pub pda: AccountInfo<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(chat_id: u64)]
+pub struct InboxPermissionContext<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    #[account(mut, seeds = [INBOX_SEED, &chat_id.to_le_bytes()], bump)]
+    pub inbox: Account<'info, PrivateInbox>,
+    /// CHECK: permission PDA under the permission program
+    #[account(mut, seeds = [PERMISSION_SEED, inbox.key().as_ref()], bump, seeds::program = permission_program.key())]
+    pub permission: UncheckedAccount<'info>,
+    /// CHECK: MagicBlock permission program
+    #[account(address = PERMISSION_PROGRAM_ID)]
+    pub permission_program: UncheckedAccount<'info>,
+    /// CHECK: ephemeral vault
+    #[account(mut, address = EPHEMERAL_VAULT_ID)]
+    pub ephemeral_vault: UncheckedAccount<'info>,
+    /// CHECK: magic program
+    #[account(address = MAGIC_PROGRAM_ID)]
+    pub magic_program: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(chat_id: u64)]
+pub struct AppendPrivateMessage<'info> {
+    #[account(mut, seeds = [INBOX_SEED, &chat_id.to_le_bytes()], bump)]
+    pub inbox: Account<'info, PrivateInbox>,
+    pub sender: Signer<'info>,
+}
+
+#[commit]
+#[derive(Accounts)]
+pub struct UndelegatePrivateInbox<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: inbox account to undelegate
+    #[account(mut)]
+    pub inbox: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(chat_id: u64)]
+pub struct ClosePrivateInbox<'info> {
+    #[account(mut, close = treasury, seeds = [INBOX_SEED, &chat_id.to_le_bytes()], bump)]
+    pub inbox: Account<'info, PrivateInbox>,
+    /// CHECK: hardcoded treasury — receives the reclaimed rent
+    #[account(mut, constraint = treasury.key() == TREASURY_PUBKEY @ ShadowError::Unauthorized)]
+    pub treasury: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct InboxMsg {
+    pub sender: Pubkey,
+    pub ts: i64,
+    pub content: String,
+}
+impl InboxMsg {
+    pub const LEN: usize = 32 + 8 + 4 + INBOX_MSG_MAX;
+}
+
+#[account]
+pub struct PrivateInbox {
+    pub chat_id: u64,
+    pub total: u64,
+    pub messages: Vec<InboxMsg>,
+}
+impl PrivateInbox {
+    // fixed allocation for the full ring buffer so the delegated account never reallocs
+    pub const LEN: usize = 8 + 8 + 4 + INBOX_CAP * InboxMsg::LEN;
+}
+
 // ========== ADMIN FORCE CLOSE ==========
 
 /// Only this wallet (the upgrade authority) can call admin_force_close
@@ -929,14 +1255,13 @@ pub struct Profile {
     pub created_at: i64,
     pub avatar_url: String,
     pub banner_url: String,
-    pub website_url: String,
 }
 
 impl Profile {
     // 32(owner) + (4+16)(username) + (4+24)(display) + (4+64)(bio) + 1(private)
     // + 4(posts) + 4(followers) + 4(following) + 2(convos legacy) + 8(created)
     // + (4+128)(avatar) + (4+128)(banner) + (4+64)(website)
-    pub const LEN: usize = 32 + 4 + 16 + 4 + 24 + 4 + 64 + 1 + 4 + 4 + 4 + 2 + 8 + 4 + 128 + 4 + 128 + 4 + 64;
+    pub const LEN: usize = 32 + 4 + 16 + 4 + 24 + 4 + 64 + 1 + 4 + 4 + 4 + 2 + 8 + 4 + 128 + 4 + 128;
 }
 
 #[account]

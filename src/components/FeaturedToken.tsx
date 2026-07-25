@@ -7,21 +7,20 @@ import TokenTrade from "@/components/TokenTrade";
 /**
  * Pinned "featured token" card at the very top of the feed.
  *
- * Used to spotlight a single token (currently the pump.fun "ANSEUM" coin) and
- * let users buy/sell it inline. Because it's a pump.fun mint, trading routes
- * through Jupiter (see <TokenTrade provider="jupiter" />), not Bags.
+ * Spotlights the official $SHYFT token and lets users buy/sell it inline.
+ * Trading routes through Jupiter (see <TokenTrade provider="jupiter" />), which
+ * aggregates all Solana liquidity (SHYFT trades on a Meteora pool).
  *
- * Live price/metadata comes from DexScreener's free public API, which indexes
- * pump.fun tokens.
+ * Live price/metadata comes from DexScreener's free public API.
  */
 
 // ─── Featured token config ───
 export const FEATURED_TOKEN = {
-  mint: "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump",
+  mint: "7tnB2Dn61NkxWrpkESkUvfoKo6TcoecsazYemptEASY",
   // Fallbacks shown until DexScreener responds.
-  symbol: "ANSEUM",
-  name: "Anseum",
-  decimals: 6, // pump.fun standard
+  symbol: "SHYFT",
+  name: "Shyft",
+  decimals: 6,
 };
 
 type DexLink = { label: string; url: string; kind: "twitter" | "telegram" | "web" };
@@ -130,7 +129,7 @@ export default function FeaturedToken() {
       <div className="flex items-center gap-1.5 px-4 pt-3 pb-1">
         <Flame className="w-3.5 h-3.5 text-orange-500" />
         <span className="text-[11px] font-bold uppercase tracking-wide text-orange-600 dark:text-orange-400">
-          Featured · Trending on Shyft
+          Featured · Trending on Kickstart
         </span>
       </div>
 

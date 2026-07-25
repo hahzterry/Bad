@@ -15,6 +15,7 @@ import { useProgram } from "@/hooks/useProgram";
 import { useWallet } from "@/hooks/usePrivyWallet";
 import { useAppStore } from "@/lib/store";
 import { toast } from "@/components/Toast";
+import { handleIpfsImgError } from "@/components/RichContent";
 import { PublicKey } from "@solana/web3.js";
 import { clearRpcCache } from "@/lib/program";
 
@@ -288,6 +289,7 @@ export default function FollowListModal({
                       {user.avatarUrl ? (
                         <img
                           src={user.avatarUrl}
+                          onError={handleIpfsImgError}
                           alt=""
                           className="w-10 h-10 rounded-full object-cover"
                         />

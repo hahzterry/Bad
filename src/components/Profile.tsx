@@ -39,7 +39,7 @@ import { useExportWallet } from "@privy-io/react-auth/solana";
 import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { toast } from "@/components/Toast";
 import { RichContent } from "@/components/RichContent";
-import { uploadImage } from "@/components/RichContent";
+import { uploadImage, handleIpfsImgError } from "@/components/RichContent";
 import { ShyftClient, clearRpcCache } from "@/lib/program";
 import FollowListModal from "@/components/FollowListModal";
 
@@ -701,6 +701,7 @@ export default function Profile() {
             {avatarUrl ? (
               <img
                 src={avatarUrl}
+                onError={handleIpfsImgError}
                 alt={profileName}
                 className="w-[84px] h-[84px] rounded-full border-4 border-white object-cover shadow-lg"
               />
@@ -1344,7 +1345,7 @@ function ProfilePostCard({
       <div className="flex gap-3">
         {/* Avatar */}
         {avatarUrl ? (
-          <img src={avatarUrl} alt={profileName} className="w-10 h-10 rounded-full object-cover flex-shrink-0" />
+          <img src={avatarUrl} onError={handleIpfsImgError} alt={profileName} className="w-10 h-10 rounded-full object-cover flex-shrink-0" />
         ) : (
           <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#EBF4FF] to-[#DBEAFE] flex items-center justify-center text-lg font-bold text-[#2563EB] flex-shrink-0">
             {profileName.charAt(0).toUpperCase()}
