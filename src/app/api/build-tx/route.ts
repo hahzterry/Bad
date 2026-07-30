@@ -51,6 +51,50 @@ const MEMBERSHIP_SEED = Buffer.from("membership");
 const POLL_SEED = Buffer.from("poll");
 const POLL_VOTE_SEED = Buffer.from("poll_vote");
 const LIKE_SEED = Buffer.from("like");
+const USERNAME_SEED = Buffer.from("username");
+const LISTING_SEED = Buffer.from("listing");
+// Official $SHYFT mint — usernames are priced in this token.
+const SHYFT_MINT = new PublicKey("7tnB2Dn61NkxWrpkESkUvfoKo6TcoecsazYemptEASY");
+const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const ATA_PROGRAM = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+function getUsernamePda(name: string): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([USERNAME_SEED, Buffer.from(name)], PROGRAM_ID);
+}
+function getListingPda(name: string): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([LISTING_SEED, Buffer.from(name)], PROGRAM_ID);
+}
+function getAta(owner: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), TOKEN_PROGRAM.toBuffer(), SHYFT_MINT.toBuffer()],
+    ATA_PROGRAM,
+  )[0];
+}
+/** Never trust the client's price. Must be a positive integer of $SHYFT base
+ * units (6 dp), within u64, no decimals/negatives/junk. */
+function parsePrice(raw: any): BN {
+  const s = String(raw ?? "").trim();
+  if (!/^[0-9]+$/.test(s)) throw new Error("Invalid price");
+  const bn = new BN(s);
+  if (bn.lten(0)) throw new Error("Price must be greater than 0");
+  if (bn.bitLength() > 64) throw new Error("Price too large");
+  return bn;
+}
+/** `createIdempotent` for a $SHYFT ATA. `payer` funds the rent (must be the
+ * buyer for marketplace buys, never the treasury — see the rent-drain rule). */
+function createAtaIdempotentIx(payer: PublicKey, ata: PublicKey, owner: PublicKey) {
+  return {
+    programId: ATA_PROGRAM,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: ata, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: false, isWritable: false },
+      { pubkey: SHYFT_MINT, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from([1]), // 1 = CreateIdempotent
+  };
+}
 
 function toLEBytes(num: number): Uint8Array {
   const buffer = new ArrayBuffer(8);
@@ -201,13 +245,116 @@ const actions: Record<string, ActionHandler> = {
 
   // ── PROFILE ──
   async createProfile(params, user, treasury, program) {
-    const { username, displayName, bio } = params;
-    if (!username || typeof username !== "string") throw new Error("Missing username");
+    // Username is now claimed separately (registry-enforced uniqueness). The
+    // program rejects a non-empty username here, so profiles start nameless and
+    // the client follows with `claimUsername`.
+    const { displayName, bio } = params;
     const [profilePda] = getProfilePda(user);
     return program.methods
-      .createProfile(username, displayName || "", bio || "")
+      .createProfile("", displayName || "", bio || "")
       .accounts({ profile: profilePda, user, payer: treasury, systemProgram: SystemProgram.programId })
       .instruction();
+  },
+
+  // ── USERNAMES / MARKETPLACE ──
+  async claimUsername(params, user, treasury, program) {
+    const name = String(params.name || "").toLowerCase();
+    if (!name) throw new Error("Missing name");
+    const [profilePda] = getProfilePda(user);
+    const [recordPda] = getUsernamePda(name);
+    return program.methods
+      .claimUsername(name)
+      .accounts({ usernameRecord: recordPda, profile: profilePda, user, payer: treasury, systemProgram: SystemProgram.programId })
+      .instruction();
+  },
+
+  async setDisplayUsername(params, user, treasury, program) {
+    const name = String(params.name || "").toLowerCase();
+    const [profilePda] = getProfilePda(user);
+    const [recordPda] = getUsernamePda(name);
+    return program.methods
+      .setDisplayUsername(name)
+      .accounts({ usernameRecord: recordPda, profile: profilePda, user })
+      .instruction();
+  },
+
+  async listUsername(params, user, treasury, program) {
+    const name = String(params.name || "").toLowerCase();
+    if (!name) throw new Error("Missing name");
+    const price = parsePrice(params.price); // validated $SHYFT base units
+    const [listingPda] = getListingPda(name);
+    const [recordPda] = getUsernamePda(name);
+    const [profilePda] = getProfilePda(user);
+    // Treasury funds the listing rent (gasless — users hold no SOL). This is
+    // SAFE from the old rent-drain because the Listing stores rent_payer =
+    // treasury and buy/delist refund ONLY to rent_payer, so a list→delist loop
+    // just cycles the treasury's own rent back (net zero), never to the user.
+    return program.methods
+      .listUsername(name, price)
+      .accounts({ listing: listingPda, usernameRecord: recordPda, sellerProfile: profilePda, seller: user, payer: treasury, systemProgram: SystemProgram.programId })
+      .instruction();
+  },
+
+  async updatePrice(params, user, treasury, program) {
+    const name = String(params.name || "").toLowerCase();
+    if (!name) throw new Error("Missing name");
+    const price = parsePrice(params.price);
+    const [listingPda] = getListingPda(name);
+    return program.methods
+      .updatePrice(name, price)
+      .accounts({ listing: listingPda, seller: user })
+      .instruction();
+  },
+
+  async delistUsername(params, user, treasury, program) {
+    const name = String(params.name || "").toLowerCase();
+    const [listingPda] = getListingPda(name);
+    const [recordPda] = getUsernamePda(name);
+    const listing: any = await (program.account as any).listing.fetch(listingPda);
+    return program.methods
+      .delistUsername(name)
+      .accounts({ listing: listingPda, rentPayer: listing.rentPayer, usernameRecord: recordPda, seller: user })
+      .instruction();
+  },
+
+  // Buyer (`user`) signs and pays. Returns [ensure-seller-ATA, buy].
+  async buyUsername(params, user, treasury, program) {
+    const name = String(params.name || "").toLowerCase();
+    if (!name) throw new Error("Missing name");
+    const [listingPda] = getListingPda(name);
+    const [recordPda] = getUsernamePda(name);
+    const [buyerProfile] = getProfilePda(user);
+
+    // Read the listing to learn the seller (the buyer signs alone).
+    const listing: any = await (program.account as any).listing.fetch(listingPda);
+    const seller: PublicKey = listing.seller;
+    const rentPayer: PublicKey = listing.rentPayer; // must match on-chain (has_one)
+
+    const buyerAta = getAta(user);
+    const sellerAta = getAta(seller);
+    const treasuryAta = getAta(treasury);
+
+    // Create the seller's $SHYFT account if missing — funded by the BUYER, never
+    // the treasury (a treasury-funded, user-owned ATA is a rent-drain loop).
+    const createSellerAta = createAtaIdempotentIx(user, sellerAta, seller);
+
+    const buyIx = await program.methods
+      .buyUsername(name)
+      .accounts({
+        listing: listingPda,
+        rentPayer, // must equal listing.rent_payer (the seller who funded it)
+        usernameRecord: recordPda,
+        buyerProfile,
+        buyer: user,
+        seller,
+        buyerToken: buyerAta,
+        sellerToken: sellerAta,
+        treasuryToken: treasuryAta, // ignored while fee is 0, but the account is still in the layout
+        tokenProgram: TOKEN_PROGRAM,
+      })
+      .instruction();
+
+    return [createSellerAta, buyIx];
   },
 
   async migrateProfile(params, user, treasury, program) {
@@ -656,7 +803,10 @@ export async function POST(request: NextRequest) {
       const handler = actions[requested.action];
       try {
         const ix = await handler(requested.params || {}, userPubkey, treasury.publicKey, program);
-        ixs.push(ix);
+        // A handler may return one instruction or several (e.g. buyUsername
+        // prepends a buyer-funded ATA creation for the seller).
+        if (Array.isArray(ix)) ixs.push(...ix);
+        else ixs.push(ix);
       } catch (err: any) {
         console.error(`❌ Build failed for action "${requested.action}":`, err?.message);
         return NextResponse.json({ error: err?.message || `Failed to build instruction: ${requested.action}` }, { status: 400 });

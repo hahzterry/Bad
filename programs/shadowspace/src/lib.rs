@@ -7,6 +7,10 @@ use ephemeral_rollups_sdk::anchor::{commit, delegate, ephemeral};
 use ephemeral_rollups_sdk::consts::{EPHEMERAL_VAULT_ID, MAGIC_PROGRAM_ID, PERMISSION_PROGRAM_ID};
 use ephemeral_rollups_sdk::cpi::DelegateConfig;
 use ephemeral_rollups_sdk::ephem::commit_and_undelegate_accounts;
+// ── Username marketplace (priced in $SHYFT) ──
+use anchor_spl::token::spl_token::state::Account as SplTokenAccount;
+use anchor_spl::token::{self, Token, Transfer as SplTransfer};
+use anchor_lang::solana_program::program_pack::Pack;
 
 declare_id!("EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ");
 
@@ -22,6 +26,39 @@ pub const MEMBERSHIP_SEED: &[u8] = b"membership";
 pub const POLL_SEED: &[u8] = b"poll";
 pub const POLL_VOTE_SEED: &[u8] = b"poll_vote";
 pub const LIKE_SEED: &[u8] = b"like";
+pub const USERNAME_SEED: &[u8] = b"username";
+pub const LISTING_SEED: &[u8] = b"listing";
+
+/// Official $SHYFT mint — usernames are bought and sold in this token only.
+#[cfg(not(feature = "devnet-mint"))]
+pub const SHYFT_MINT: Pubkey = pubkey!("7tnB2Dn61NkxWrpkESkUvfoKo6TcoecsazYemptEASY");
+/// Devnet stand-in. The real mint's authority is revoked so it cannot be
+/// recreated off mainnet; devnet builds price against a test token instead.
+#[cfg(feature = "devnet-mint")]
+pub const SHYFT_MINT: Pubkey = pubkey!("HmpXENZ7a1yK4GbfgZqgfcwTfSzLfBFAtYaGANScfxyC");
+
+/// Marketplace cut in basis points. 0 = no fee (growth phase — bring users
+/// first). Raise later once there's volume; the treasury will then need a
+/// $SHYFT token account before the first paid sale.
+pub const MARKETPLACE_FEE_BPS: u64 = 0;
+
+/// Max username length — must match Profile's 16-byte username budget.
+pub const MAX_USERNAME_LEN: usize = 16;
+
+/// Names are the PDA seed, so they must be canonical: lowercase only, or
+/// "Alice" and "alice" would hash to two different records.
+fn validate_username(name: &str) -> Result<()> {
+    require!(
+        !name.is_empty() && name.len() <= MAX_USERNAME_LEN,
+        ShadowError::ContentTooLong
+    );
+    require!(
+        name.bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_')),
+        ShadowError::InvalidUsername
+    );
+    Ok(())
+}
 
 /// Hardcoded treasury wallet — ALL rent refunds MUST go here.
 pub const TREASURY_PUBKEY: Pubkey = pubkey!("4tpjCdXS1fKiYoBYLvTNNyHwzTAhuigB3TY6Wd2QbxT9");
@@ -52,6 +89,11 @@ pub mod shadowspace {
         let profile = &mut ctx.accounts.profile;
         // Prevent re-initialization — created_at == 0 means fresh account
         require!(profile.created_at == 0, ShadowError::AlreadyInitialized);
+        // A username can ONLY come from the registry (claim_username), which
+        // enforces uniqueness. Letting create_profile set one directly is how a
+        // stranger could display a name someone else owns — so it must start
+        // empty and the user claims a name in a second step.
+        require!(username.is_empty(), ShadowError::UsernameNotClaimed);
         profile.owner = ctx.accounts.user.key();
         profile.username = username;
         profile.display_name = display_name;
@@ -98,6 +140,259 @@ pub mod shadowspace {
         profile.banner_url = banner_url;
         let _ = website_url;
         msg!("Profile updated for {}", profile.owner);
+        Ok(())
+    }
+
+    // ========== USERNAMES (tradable) ==========
+
+    /// Claim a username into the on-chain registry.
+    ///
+    /// Uniqueness is enforced by the runtime, not by a client-side scan: the
+    /// record PDA is seeded by the name itself, so `init` fails outright if the
+    /// name is already claimed. `name` must already be lowercase — the seed is
+    /// the raw bytes, so accepting mixed case would let "Alice" and "alice"
+    /// both exist.
+    pub fn claim_username(ctx: Context<ClaimUsername>, name: String) -> Result<()> {
+        validate_username(&name)?;
+
+        let record = &mut ctx.accounts.username_record;
+        record.owner = ctx.accounts.user.key();
+        record.name = name.clone();
+        record.profile = ctx.accounts.profile.key();
+        record.created_at = Clock::get()?.unix_timestamp;
+        record.transfer_count = 0;
+        record.bump = ctx.bumps.username_record;
+
+        ctx.accounts.profile.username = name;
+        msg!("Username claimed by {}", record.owner);
+        Ok(())
+    }
+
+    /// Point your profile at one of the names you own.
+    ///
+    /// This is what keeps a wallet from being trapped: names are owned
+    /// independently of which one you display, so you can hold several and
+    /// switch freely, or free up the displayed one before selling it.
+    pub fn set_display_username(ctx: Context<SetDisplayUsername>, name: String) -> Result<()> {
+        let record = &mut ctx.accounts.username_record;
+        require_keys_eq!(
+            record.owner,
+            ctx.accounts.user.key(),
+            ShadowError::NotUsernameOwner
+        );
+        require!(name == record.name, ShadowError::Unauthorized);
+
+        let profile = &mut ctx.accounts.profile;
+        profile.username = record.name.clone();
+        record.profile = profile.key();
+        msg!("Now displaying {}", record.name);
+        Ok(())
+    }
+
+    /// One-time migration: mint the registry record for a username that a
+    /// profile already displays.
+    ///
+    /// The name is taken from the profile itself, not chosen by the admin —
+    /// this can only ratify what is already on-chain, never assign a name to
+    /// someone. `init` means a second backfill of the same name fails, which
+    /// is what resolves the pre-existing duplicates: whoever is backfilled
+    /// first keeps it, so the script must submit the rightful owner.
+    ///
+    /// Must be run for every existing username BEFORE public claiming opens,
+    /// or squatters will take names their owners have used for months.
+    pub fn admin_backfill_username(ctx: Context<AdminBackfillUsername>, name: String) -> Result<()> {
+        validate_username(&name)?;
+        require!(
+            ctx.accounts.profile.username == name,
+            ShadowError::Unauthorized
+        );
+
+        let record = &mut ctx.accounts.username_record;
+        record.owner = ctx.accounts.profile.owner;
+        record.name = name;
+        record.profile = ctx.accounts.profile.key();
+        record.created_at = Clock::get()?.unix_timestamp;
+        record.transfer_count = 0;
+        record.bump = ctx.bumps.username_record;
+        msg!("Backfilled {} -> {}", record.name, record.owner);
+        Ok(())
+    }
+
+    /// Transfer a username to another wallet.
+    ///
+    /// Both parties sign. Requiring the recipient's signature is deliberate:
+    /// the instruction writes the name onto their profile, so a one-sided
+    /// transfer would let anyone overwrite a stranger's displayed username.
+    ///
+    /// You cannot give away the name you are currently displaying — call
+    /// `set_display_username` (or claim a new name, which displays it) first.
+    /// That single rule is what guarantees nobody is ever left nameless,
+    /// without forcing them to mint a throwaway name on every transfer.
+    pub fn transfer_username(ctx: Context<TransferUsername>, name: String) -> Result<()> {
+        let record = &mut ctx.accounts.username_record;
+        require_keys_eq!(
+            record.owner,
+            ctx.accounts.current_owner.key(),
+            ShadowError::NotUsernameOwner
+        );
+        require!(name == record.name, ShadowError::Unauthorized);
+        require!(
+            ctx.accounts.from_profile.username != record.name,
+            ShadowError::MustSwitchNameFirst
+        );
+
+        let to_profile = &mut ctx.accounts.to_profile;
+        to_profile.username = record.name.clone();
+        record.owner = ctx.accounts.new_owner.key();
+        record.profile = to_profile.key();
+        record.transfer_count = record.transfer_count.saturating_add(1);
+
+        msg!("Username transferred to {}", record.owner);
+        Ok(())
+    }
+
+    // ========== USERNAME MARKETPLACE ==========
+
+    /// List a username for sale at a fixed price in $SHYFT.
+    ///
+    /// The name is escrowed by reassigning the record to the listing PDA, so
+    /// the seller cannot transfer it out from under a buyer — and, crucially,
+    /// a buyer can complete the purchase later without the seller online.
+    ///
+    /// You cannot list the name you are currently displaying — switch away
+    /// first. Enforcing that here (rather than minting a replacement on every
+    /// listing) means relisting or changing your price costs nothing, and a
+    /// seller holding several names keeps the one they actually use.
+    pub fn list_username(ctx: Context<ListUsername>, name: String, price: u64) -> Result<()> {
+        require!(price > 0, ShadowError::InvalidAmount);
+
+        let record = &mut ctx.accounts.username_record;
+        require_keys_eq!(
+            record.owner,
+            ctx.accounts.seller.key(),
+            ShadowError::NotUsernameOwner
+        );
+        require!(name == record.name, ShadowError::Unauthorized);
+        require!(
+            ctx.accounts.seller_profile.username != record.name,
+            ShadowError::MustSwitchNameFirst
+        );
+
+        // Escrow: the listing PDA owns the name until sold or delisted.
+        record.owner = ctx.accounts.listing.key();
+        record.profile = Pubkey::default();
+
+        let listing = &mut ctx.accounts.listing;
+        listing.seller = ctx.accounts.seller.key();
+        listing.name = name;
+        listing.price = price;
+        listing.created_at = Clock::get()?.unix_timestamp;
+        listing.bump = ctx.bumps.listing;
+        listing.rent_payer = ctx.accounts.payer.key();
+
+        msg!("Listed for {} $SHYFT base units", price);
+        Ok(())
+    }
+
+    /// Buy a listed username. Signed by the buyer alone.
+    ///
+    /// Payment and handover happen in one instruction, so neither side can be
+    /// left short: the tokens only move if the name moves.
+    pub fn buy_username(ctx: Context<BuyUsername>, name: String) -> Result<()> {
+        // Token accounts arrive unchecked (see Cargo.toml), so verify each one
+        // is a real $SHYFT account held by the party we expect. Without this a
+        // buyer could pass a worthless mint, or route payment to themselves.
+        let expect_token_account = |info: &UncheckedAccount, owner: Pubkey| -> Result<()> {
+            // Must genuinely belong to the SPL Token program. Unpacking alone
+            // would accept a look-alike account owned by anything.
+            require_keys_eq!(
+                *info.owner,
+                anchor_spl::token::ID,
+                ShadowError::Unauthorized
+            );
+            let parsed = SplTokenAccount::unpack(&info.try_borrow_data()?)
+                .map_err(|_| error!(ShadowError::InvalidAmount))?;
+            require_keys_eq!(parsed.mint, SHYFT_MINT, ShadowError::InvalidAmount);
+            require_keys_eq!(parsed.owner, owner, ShadowError::Unauthorized);
+            Ok(())
+        };
+        expect_token_account(&ctx.accounts.buyer_token, ctx.accounts.buyer.key())?;
+        expect_token_account(&ctx.accounts.seller_token, ctx.accounts.listing.seller)?;
+
+        let price = ctx.accounts.listing.price;
+        let fee = price
+            .checked_mul(MARKETPLACE_FEE_BPS)
+            .ok_or(ShadowError::InvalidAmount)?
+            / 10_000;
+        let to_seller = price.checked_sub(fee).ok_or(ShadowError::InvalidAmount)?;
+
+        // Only require + validate the treasury account when a fee is actually
+        // taken. With MARKETPLACE_FEE_BPS = 0 the treasury needs no $SHYFT
+        // account and the whole buy is seller-only.
+        if fee > 0 {
+            expect_token_account(&ctx.accounts.treasury_token, TREASURY_PUBKEY)?;
+        }
+
+        // Buyer → seller
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                SplTransfer {
+                    from: ctx.accounts.buyer_token.to_account_info(),
+                    to: ctx.accounts.seller_token.to_account_info(),
+                    authority: ctx.accounts.buyer.to_account_info(),
+                },
+            ),
+            to_seller,
+        )?;
+
+        // Buyer → treasury (marketplace fee)
+        if fee > 0 {
+            token::transfer(
+                CpiContext::new(
+                    ctx.accounts.token_program.to_account_info(),
+                    SplTransfer {
+                        from: ctx.accounts.buyer_token.to_account_info(),
+                        to: ctx.accounts.treasury_token.to_account_info(),
+                        authority: ctx.accounts.buyer.to_account_info(),
+                    },
+                ),
+                fee,
+            )?;
+        }
+
+        // Hand over the name.
+        let buyer_profile = &mut ctx.accounts.buyer_profile;
+        let record = &mut ctx.accounts.username_record;
+        require!(name == record.name, ShadowError::Unauthorized);
+        record.owner = ctx.accounts.buyer.key();
+        record.profile = buyer_profile.key();
+        record.transfer_count = record.transfer_count.saturating_add(1);
+        buyer_profile.username = record.name.clone();
+
+        msg!("Sold for {} ({} fee)", price, fee);
+        Ok(())
+    }
+
+    /// Reprice an open listing without unwinding the escrow.
+    pub fn update_price(ctx: Context<UpdatePrice>, _name: String, new_price: u64) -> Result<()> {
+        require!(new_price > 0, ShadowError::InvalidAmount);
+        ctx.accounts.listing.price = new_price;
+        msg!("Repriced to {}", new_price);
+        Ok(())
+    }
+
+    /// Withdraw a listing and take the name back.
+    pub fn delist_username(ctx: Context<DelistUsername>, name: String) -> Result<()> {
+        let record = &mut ctx.accounts.username_record;
+        require!(name == record.name, ShadowError::Unauthorized);
+        require_keys_eq!(
+            record.owner,
+            ctx.accounts.listing.key(),
+            ShadowError::Unauthorized
+        );
+        record.owner = ctx.accounts.seller.key();
+        msg!("Delisted");
         Ok(())
     }
 
@@ -684,6 +979,211 @@ pub struct UpdateProfile<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(name: String)]
+pub struct ClaimUsername<'info> {
+    /// Seeded by the name itself — this is what makes the name unique on-chain.
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + UsernameRecord::LEN,
+        seeds = [USERNAME_SEED, name.as_bytes()],
+        bump,
+    )]
+    pub username_record: Account<'info, UsernameRecord>,
+    #[account(
+        mut,
+        seeds = [PROFILE_SEED, user.key().as_ref()],
+        bump,
+        constraint = profile.owner == user.key() @ ShadowError::Unauthorized,
+    )]
+    pub profile: Account<'info, Profile>,
+    pub user: Signer<'info>,
+    /// Fee payer — can be a server keypair for gasless UX
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(name: String)]
+pub struct AdminBackfillUsername<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + UsernameRecord::LEN,
+        seeds = [USERNAME_SEED, name.as_bytes()],
+        bump,
+    )]
+    pub username_record: Account<'info, UsernameRecord>,
+    /// Read-only: the backfill ratifies this profile's existing username.
+    #[account(seeds = [PROFILE_SEED, profile.owner.as_ref()], bump)]
+    pub profile: Account<'info, Profile>,
+    #[account(mut, constraint = authority.key() == ADMIN_AUTHORITY @ ShadowError::Unauthorized)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(name: String)]
+pub struct SetDisplayUsername<'info> {
+    #[account(
+        mut,
+        seeds = [USERNAME_SEED, name.as_bytes()],
+        bump = username_record.bump,
+    )]
+    pub username_record: Account<'info, UsernameRecord>,
+    #[account(
+        mut,
+        seeds = [PROFILE_SEED, user.key().as_ref()],
+        bump,
+    )]
+    pub profile: Account<'info, Profile>,
+    pub user: Signer<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(name: String)]
+pub struct TransferUsername<'info> {
+    #[account(
+        mut,
+        seeds = [USERNAME_SEED, name.as_bytes()],
+        bump = username_record.bump,
+    )]
+    pub username_record: Account<'info, UsernameRecord>,
+    #[account(
+        mut,
+        seeds = [PROFILE_SEED, current_owner.key().as_ref()],
+        bump,
+    )]
+    pub from_profile: Account<'info, Profile>,
+    #[account(
+        mut,
+        seeds = [PROFILE_SEED, new_owner.key().as_ref()],
+        bump,
+    )]
+    pub to_profile: Account<'info, Profile>,
+    pub current_owner: Signer<'info>,
+    /// Signs too — see `transfer_username` for why this is not one-sided.
+    pub new_owner: Signer<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(name: String, price: u64)]
+pub struct ListUsername<'info> {
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + Listing::LEN,
+        seeds = [LISTING_SEED, name.as_bytes()],
+        bump,
+    )]
+    pub listing: Account<'info, Listing>,
+    #[account(
+        mut,
+        seeds = [USERNAME_SEED, name.as_bytes()],
+        bump = username_record.bump,
+    )]
+    pub username_record: Account<'info, UsernameRecord>,
+    #[account(
+        seeds = [PROFILE_SEED, seller.key().as_ref()],
+        bump,
+    )]
+    pub seller_profile: Account<'info, Profile>,
+    pub seller: Signer<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(name: String)]
+pub struct BuyUsername<'info> {
+    /// Rent goes back to whoever FUNDED the listing (rent_payer), never the
+    /// seller — otherwise list→delist loops drain the funder.
+    #[account(
+        mut,
+        close = rent_payer,
+        seeds = [LISTING_SEED, name.as_bytes()],
+        bump = listing.bump,
+        has_one = seller @ ShadowError::Unauthorized,
+        has_one = rent_payer @ ShadowError::Unauthorized,
+    )]
+    pub listing: Account<'info, Listing>,
+    /// CHECK: must equal listing.rent_payer (enforced by has_one); receives the
+    /// listing's rent refund on close.
+    #[account(mut)]
+    pub rent_payer: UncheckedAccount<'info>,
+    #[account(
+        mut,
+        seeds = [USERNAME_SEED, name.as_bytes()],
+        bump = username_record.bump,
+        constraint = username_record.owner == listing.key() @ ShadowError::Unauthorized,
+    )]
+    pub username_record: Account<'info, UsernameRecord>,
+    #[account(
+        mut,
+        seeds = [PROFILE_SEED, buyer.key().as_ref()],
+        bump,
+    )]
+    pub buyer_profile: Account<'info, Profile>,
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+    /// CHECK: verified against `listing.seller` by `has_one`; receives payment
+    /// and the listing's rent refund.
+    #[account(mut)]
+    pub seller: UncheckedAccount<'info>,
+    /// CHECK: unpacked and checked against SHYFT_MINT + buyer in the handler.
+    #[account(mut)]
+    pub buyer_token: UncheckedAccount<'info>,
+    /// CHECK: unpacked and checked against SHYFT_MINT + listing.seller.
+    #[account(mut)]
+    pub seller_token: UncheckedAccount<'info>,
+    /// CHECK: unpacked and checked against SHYFT_MINT + TREASURY_PUBKEY.
+    #[account(mut)]
+    pub treasury_token: UncheckedAccount<'info>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+#[instruction(name: String)]
+pub struct UpdatePrice<'info> {
+    #[account(
+        mut,
+        seeds = [LISTING_SEED, name.as_bytes()],
+        bump = listing.bump,
+        has_one = seller @ ShadowError::Unauthorized,
+    )]
+    pub listing: Account<'info, Listing>,
+    pub seller: Signer<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(name: String)]
+pub struct DelistUsername<'info> {
+    #[account(
+        mut,
+        close = rent_payer,
+        seeds = [LISTING_SEED, name.as_bytes()],
+        bump = listing.bump,
+        has_one = seller @ ShadowError::Unauthorized,
+        has_one = rent_payer @ ShadowError::Unauthorized,
+    )]
+    pub listing: Account<'info, Listing>,
+    /// CHECK: must equal listing.rent_payer (enforced by has_one); receives the
+    /// rent refund on close.
+    #[account(mut)]
+    pub rent_payer: UncheckedAccount<'info>,
+    #[account(
+        mut,
+        seeds = [USERNAME_SEED, name.as_bytes()],
+        bump = username_record.bump,
+    )]
+    pub username_record: Account<'info, UsernameRecord>,
+    #[account(mut)]
+    pub seller: Signer<'info>,
+}
+
+#[derive(Accounts)]
 #[instruction(post_id: u64)]
 pub struct CreatePost<'info> {
     #[account(init_if_needed, payer = payer, space = 8 + Post::LEN, seeds = [POST_SEED, profile.owner.as_ref(), &post_id.to_le_bytes()], bump)]
@@ -1264,6 +1764,44 @@ impl Profile {
     pub const LEN: usize = 32 + 4 + 16 + 4 + 24 + 4 + 64 + 1 + 4 + 4 + 4 + 2 + 8 + 4 + 128 + 4 + 128;
 }
 
+/// A claimed username. Seeded by the name, owned by a wallet, transferable
+/// independently of the profile that displays it.
+#[account]
+pub struct UsernameRecord {
+    pub owner: Pubkey,
+    pub name: String,
+    /// Profile currently displaying this name.
+    pub profile: Pubkey,
+    pub created_at: i64,
+    pub transfer_count: u32,
+    pub bump: u8,
+}
+
+impl UsernameRecord {
+    // 32(owner) + (4+16)(name) + 32(profile) + 8(created_at) + 4(transfers) + 1(bump)
+    pub const LEN: usize = 32 + 4 + 16 + 32 + 8 + 4 + 1;
+}
+
+/// An open fixed-price sale. Its existence means the name is escrowed.
+#[account]
+pub struct Listing {
+    pub seller: Pubkey,
+    pub name: String,
+    /// Price in $SHYFT base units (6 decimals).
+    pub price: u64,
+    pub created_at: i64,
+    pub bump: u8,
+    /// Who funded this listing's rent — the ONLY account the rent may be
+    /// refunded to on close. Refunding to the seller instead lets an attacker
+    /// loop list→delist and drain whoever paid (the treasury, in gasless mode).
+    pub rent_payer: Pubkey,
+}
+
+impl Listing {
+    // 32(seller) + (4+16)(name) + 8(price) + 8(created_at) + 1(bump) + 32(rent_payer)
+    pub const LEN: usize = 32 + 4 + 16 + 8 + 8 + 1 + 32;
+}
+
 #[account]
 pub struct Post {
     pub author: Pubkey,
@@ -1455,4 +1993,14 @@ pub enum ShadowError {
     CannotLikeOwnPost,
     #[msg("Invalid reaction type")]
     InvalidReactionType,
+    // NOTE: append new variants here only — inserting above would renumber the
+    // existing error codes that clients already match on.
+    #[msg("Username must be lowercase a-z, 0-9 or underscore")]
+    InvalidUsername,
+    #[msg("You do not own this username")]
+    NotUsernameOwner,
+    #[msg("Switch to another username before moving this one")]
+    MustSwitchNameFirst,
+    #[msg("Create the profile with an empty username, then claim a name")]
+    UsernameNotClaimed,
 }

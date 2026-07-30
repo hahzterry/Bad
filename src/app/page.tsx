@@ -8,6 +8,7 @@ import Header from "@/components/Header";
 import Feed from "@/components/Feed";
 import Chat from "@/components/Chat";
 import Payments from "@/components/Payments";
+import Marketplace from "@/components/Marketplace";
 import Profile from "@/components/Profile";
 import CreatorDashboard from "@/components/CreatorDashboard";
 import Friends from "@/components/Friends";
@@ -126,6 +127,7 @@ export default function Home() {
           {activeTab === "communities" && <Communities />}
           {activeTab === "quests" && <Quests />}
           {activeTab === "payments" && <Payments />}
+          {activeTab === "market" && <Marketplace />}
           {activeTab === "dashboard" && <CreatorDashboard />}
           {activeTab === "ai" && <AI />}
           {activeTab === "profile" && <Profile />}

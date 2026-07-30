@@ -8,6 +8,101 @@
   },
   "instructions": [
     {
+      "name": "admin_backfill_username",
+      "docs": [
+        "One-time migration: mint the registry record for a username that a",
+        "profile already displays.",
+        "",
+        "The name is taken from the profile itself, not chosen by the admin —",
+        "this can only ratify what is already on-chain, never assign a name to",
+        "someone. `init` means a second backfill of the same name fails, which",
+        "is what resolves the pre-existing duplicates: whoever is backfilled",
+        "first keeps it, so the script must submit the rightful owner.",
+        "",
+        "Must be run for every existing username BEFORE public claiming opens,",
+        "or squatters will take names their owners have used for months."
+      ],
+      "discriminator": [
+        223,
+        16,
+        181,
+        38,
+        135,
+        206,
+        24,
+        83
+      ],
+      "accounts": [
+        {
+          "name": "username_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "profile",
+          "docs": [
+            "Read-only: the backfill ratifies this profile's existing username."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "profile.owner",
+                "account": "Profile"
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        }
+      ]
+    },
+    {
       "name": "admin_force_close",
       "docs": [
         "Admin force-close: lets the upgrade authority close ANY program account",
@@ -89,6 +184,249 @@
         },
         {
           "name": "content",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "buy_username",
+      "docs": [
+        "Buy a listed username. Signed by the buyer alone.",
+        "",
+        "Payment and handover happen in one instruction, so neither side can be",
+        "left short: the tokens only move if the name moves."
+      ],
+      "discriminator": [
+        198,
+        135,
+        224,
+        174,
+        74,
+        242,
+        11,
+        44
+      ],
+      "accounts": [
+        {
+          "name": "listing",
+          "docs": [
+            "Rent goes back to whoever FUNDED the listing (rent_payer), never the",
+            "seller — otherwise list→delist loops drain the funder."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  115,
+                  116,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "rent_payer",
+          "docs": [
+            "listing's rent refund on close."
+          ],
+          "writable": true,
+          "relations": [
+            "listing"
+          ]
+        },
+        {
+          "name": "username_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "buyer_profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "buyer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "buyer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "seller",
+          "docs": [
+            "and the listing's rent refund."
+          ],
+          "writable": true,
+          "relations": [
+            "listing"
+          ]
+        },
+        {
+          "name": "buyer_token",
+          "writable": true
+        },
+        {
+          "name": "seller_token",
+          "writable": true
+        },
+        {
+          "name": "treasury_token",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "claim_username",
+      "docs": [
+        "Claim a username into the on-chain registry.",
+        "",
+        "Uniqueness is enforced by the runtime, not by a client-side scan: the",
+        "record PDA is seeded by the name itself, so `init` fails outright if the",
+        "name is already claimed. `name` must already be lowercase — the seed is",
+        "the raw bytes, so accepting mixed case would let \"Alice\" and \"alice\"",
+        "both exist."
+      ],
+      "discriminator": [
+        161,
+        41,
+        99,
+        255,
+        196,
+        83,
+        221,
+        148
+      ],
+      "accounts": [
+        {
+          "name": "username_record",
+          "docs": [
+            "Seeded by the name itself — this is what makes the name unique on-chain."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "user",
+          "signer": true
+        },
+        {
+          "name": "payer",
+          "docs": [
+            "Fee payer — can be a server keypair for gasless UX"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
           "type": "string"
         }
       ]
@@ -1712,6 +2050,97 @@
       ]
     },
     {
+      "name": "delist_username",
+      "docs": [
+        "Withdraw a listing and take the name back."
+      ],
+      "discriminator": [
+        140,
+        83,
+        160,
+        68,
+        207,
+        74,
+        168,
+        103
+      ],
+      "accounts": [
+        {
+          "name": "listing",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  115,
+                  116,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "rent_payer",
+          "docs": [
+            "rent refund on close."
+          ],
+          "writable": true,
+          "relations": [
+            "listing"
+          ]
+        },
+        {
+          "name": "username_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "seller",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "listing"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        }
+      ]
+    },
+    {
       "name": "edit_post",
       "discriminator": [
         218,
@@ -2501,6 +2930,128 @@
       ]
     },
     {
+      "name": "list_username",
+      "docs": [
+        "List a username for sale at a fixed price in $SHYFT.",
+        "",
+        "The name is escrowed by reassigning the record to the listing PDA, so",
+        "the seller cannot transfer it out from under a buyer — and, crucially,",
+        "a buyer can complete the purchase later without the seller online.",
+        "",
+        "You cannot list the name you are currently displaying — switch away",
+        "first. Enforcing that here (rather than minting a replacement on every",
+        "listing) means relisting or changing your price costs nothing, and a",
+        "seller holding several names keeps the one they actually use."
+      ],
+      "discriminator": [
+        239,
+        211,
+        152,
+        104,
+        105,
+        21,
+        227,
+        11
+      ],
+      "accounts": [
+        {
+          "name": "listing",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  115,
+                  116,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "username_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "seller_profile",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "seller"
+              }
+            ]
+          }
+        },
+        {
+          "name": "seller",
+          "signer": true
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "price",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "migrate_profile",
       "docs": [
         "Resize an existing profile account to the current schema size.",
@@ -2886,6 +3437,204 @@
       ]
     },
     {
+      "name": "set_display_username",
+      "docs": [
+        "Point your profile at one of the names you own.",
+        "",
+        "This is what keeps a wallet from being trapped: names are owned",
+        "independently of which one you display, so you can hold several and",
+        "switch freely, or free up the displayed one before selling it."
+      ],
+      "discriminator": [
+        159,
+        240,
+        244,
+        13,
+        124,
+        118,
+        248,
+        80
+      ],
+      "accounts": [
+        {
+          "name": "username_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "user",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "transfer_username",
+      "docs": [
+        "Transfer a username to another wallet.",
+        "",
+        "Both parties sign. Requiring the recipient's signature is deliberate:",
+        "the instruction writes the name onto their profile, so a one-sided",
+        "transfer would let anyone overwrite a stranger's displayed username.",
+        "",
+        "You cannot give away the name you are currently displaying — call",
+        "`set_display_username` (or claim a new name, which displays it) first.",
+        "That single rule is what guarantees nobody is ever left nameless,",
+        "without forcing them to mint a throwaway name on every transfer."
+      ],
+      "discriminator": [
+        249,
+        219,
+        120,
+        168,
+        30,
+        177,
+        38,
+        41
+      ],
+      "accounts": [
+        {
+          "name": "username_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "from_profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "current_owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "to_profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "new_owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "current_owner",
+          "signer": true
+        },
+        {
+          "name": "new_owner",
+          "docs": [
+            "Signs too — see `transfer_username` for why this is not one-sided."
+          ],
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        }
+      ]
+    },
+    {
       "name": "undelegate_chat",
       "docs": [
         "(ER) Commit chat state to Solana and return control of the chat PDA so it can be closed."
@@ -3122,6 +3871,65 @@
         {
           "name": "avatar_url",
           "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "update_price",
+      "docs": [
+        "Reprice an open listing without unwinding the escrow."
+      ],
+      "discriminator": [
+        61,
+        34,
+        117,
+        155,
+        75,
+        34,
+        123,
+        208
+      ],
+      "accounts": [
+        {
+          "name": "listing",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  115,
+                  116,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "seller",
+          "signer": true,
+          "relations": [
+            "listing"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "_name",
+          "type": "string"
+        },
+        {
+          "name": "new_price",
+          "type": "u64"
         }
       ]
     },
@@ -3390,6 +4198,19 @@
       ]
     },
     {
+      "name": "Listing",
+      "discriminator": [
+        218,
+        32,
+        50,
+        73,
+        43,
+        134,
+        26,
+        58
+      ]
+    },
+    {
       "name": "Membership",
       "discriminator": [
         231,
@@ -3492,6 +4313,19 @@
         142,
         139
       ]
+    },
+    {
+      "name": "UsernameRecord",
+      "discriminator": [
+        42,
+        172,
+        136,
+        41,
+        240,
+        123,
+        100,
+        204
+      ]
     }
   ],
   "errors": [
@@ -3564,6 +4398,26 @@
       "code": 6013,
       "name": "InvalidReactionType",
       "msg": "Invalid reaction type"
+    },
+    {
+      "code": 6014,
+      "name": "InvalidUsername",
+      "msg": "Username must be lowercase a-z, 0-9 or underscore"
+    },
+    {
+      "code": 6015,
+      "name": "NotUsernameOwner",
+      "msg": "You do not own this username"
+    },
+    {
+      "code": 6016,
+      "name": "MustSwitchNameFirst",
+      "msg": "Switch to another username before moving this one"
+    },
+    {
+      "code": 6017,
+      "name": "UsernameNotClaimed",
+      "msg": "Create the profile with an empty username, then claim a name"
     }
   ],
   "types": [
@@ -3711,6 +4565,49 @@
           {
             "name": "liked_at",
             "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Listing",
+      "docs": [
+        "An open fixed-price sale. Its existence means the name is escrowed."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "seller",
+            "type": "pubkey"
+          },
+          {
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "name": "price",
+            "docs": [
+              "Price in $SHYFT base units (6 decimals)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "rent_payer",
+            "docs": [
+              "Who funded this listing's rent — the ONLY account the rent may be",
+              "refunded to on close. Refunding to the seller instead lets an attacker",
+              "loop list→delist and drain whoever paid (the treasury, in gasless mode)."
+            ],
+            "type": "pubkey"
           }
         ]
       }
@@ -4023,6 +4920,45 @@
           },
           {
             "name": "reaction_type",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UsernameRecord",
+      "docs": [
+        "A claimed username. Seeded by the name, owned by a wallet, transferable",
+        "independently of the profile that displays it."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "name": "profile",
+            "docs": [
+              "Profile currently displaying this name."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "transfer_count",
+            "type": "u32"
+          },
+          {
+            "name": "bump",
             "type": "u8"
           }
         ]

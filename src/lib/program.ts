@@ -54,6 +54,8 @@ function expandIpfsUrl(stored: string): string {
 
 const PROFILE_SEED = Buffer.from("profile");
 const POST_SEED = Buffer.from("post");
+const USERNAME_SEED = Buffer.from("username");
+const LISTING_SEED = Buffer.from("listing");
 const CHAT_SEED = Buffer.from("chat");
 const MESSAGE_SEED = Buffer.from("message");
 const FOLLOW_SEED = Buffer.from("follow");
@@ -302,6 +304,12 @@ function toBEBytes(num: number): Uint8Array {
 function getProfilePda(owner: PublicKey): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([PROFILE_SEED, owner.toBuffer()], PROGRAM_ID);
 }
+function getUsernamePda(name: string): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([USERNAME_SEED, Buffer.from(name)], PROGRAM_ID);
+}
+function getListingPda(name: string): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([LISTING_SEED, Buffer.from(name)], PROGRAM_ID);
+}
 
 function getPostPda(author: PublicKey, postId: number): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([POST_SEED, author.toBuffer(), toLEBytes(postId)], PROGRAM_ID);
@@ -383,14 +391,92 @@ export class ShyftClient {
       // ignore — account may not exist yet
     }
 
-    // Server builds tx, treasury signs, user co-signs + sends to Solana
-    const sig = await requestServerTx("createProfile", { username, displayName, bio }, this.provider.wallet, this.provider.connection);
+    // Two on-chain steps (the program no longer lets create_profile set a name
+    // directly — that was the impersonation hole). First create the profile
+    // nameless, then claim the username through the registry, which enforces
+    // uniqueness. Callers pass the username exactly as before; this hides the
+    // split.
+    const sig = await requestServerTx("createProfile", { displayName, bio }, this.provider.wallet, this.provider.connection);
+    if (username && username.trim()) {
+      // CRITICAL: requestServerTx returns after SENDING, not confirming. The
+      // claim needs the profile account to already exist on-chain, so wait for
+      // it to actually land before claiming — otherwise the claim races the
+      // creation and fails with AccountNotInitialized.
+      const [profilePda2] = getProfilePda(user);
+      let exists = false;
+      for (let i = 0; i < 30; i++) {
+        const info = await this.provider.connection.getAccountInfo(profilePda2, "confirmed");
+        if (info) { exists = true; break; }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      if (!exists) throw new Error("Profile is still confirming — try claiming your name again in a moment.");
+      try {
+        await this.claimUsername(username.trim());
+      } catch (e: any) {
+        // Profile exists but the name didn't stick (e.g. taken in the moment).
+        // Surface it so the user can pick another — they aren't blocked from
+        // claiming later.
+        throw new Error(`Profile created, but @${username.trim()} could not be claimed: ${e?.message || e}. Pick another name.`);
+      }
+    }
     return sig;
   }
 
   async migrateProfile(): Promise<string> {
     const sig = await requestServerTx("migrateProfile", {}, this.provider.wallet, this.provider.connection);
     return sig;
+  }
+
+  // ── USERNAMES / MARKETPLACE ──
+
+  /** Claim a fresh username (registry-enforced uniqueness). Also displays it. */
+  async claimUsername(name: string): Promise<string> {
+    const lower = name.trim().toLowerCase().replace(/[^a-z0-9_]/g,"");
+    const reserved = checkUsername(lower);
+    if (reserved.blocked) throw new Error(reserved.reason || "This username is reserved");
+    return requestServerTx("claimUsername", { name: lower }, this.provider.wallet, this.provider.connection);
+  }
+
+  /** Switch your displayed name to another one you own. */
+  async setDisplayUsername(name: string): Promise<string> {
+    return requestServerTx("setDisplayUsername", { name: name.trim().toLowerCase().replace(/[^a-z0-9_]/g,"") }, this.provider.wallet, this.provider.connection);
+  }
+
+  /** List a name for sale. `price` is whole $SHYFT (converted to 6-dp base units). */
+  async listUsername(name: string, priceShyft: number): Promise<string> {
+    const base = Math.round(priceShyft * 1_000_000).toString();
+    return requestServerTx("listUsername", { name: name.trim().toLowerCase().replace(/[^a-z0-9_]/g,""), price: base }, this.provider.wallet, this.provider.connection);
+  }
+
+  async updatePrice(name: string, priceShyft: number): Promise<string> {
+    const base = Math.round(priceShyft * 1_000_000).toString();
+    return requestServerTx("updatePrice", { name: name.trim().toLowerCase().replace(/[^a-z0-9_]/g,""), price: base }, this.provider.wallet, this.provider.connection);
+  }
+
+  async delistUsername(name: string): Promise<string> {
+    return requestServerTx("delistUsername", { name: name.trim().toLowerCase().replace(/[^a-z0-9_]/g,"") }, this.provider.wallet, this.provider.connection);
+  }
+
+  async buyUsername(name: string): Promise<string> {
+    return requestServerTx("buyUsername", { name: name.trim().toLowerCase().replace(/[^a-z0-9_]/g,"") }, this.provider.wallet, this.provider.connection);
+  }
+
+  /** Fetch a username record (owner, transfer count) or null if unclaimed. */
+  async getUsernameRecord(name: string): Promise<any | null> {
+    const [pda] = getUsernamePda(name.trim().toLowerCase().replace(/[^a-z0-9_]/g,""));
+    try { return await (this.program.account as any).usernameRecord.fetch(pda); }
+    catch { return null; }
+  }
+
+  /** All open marketplace listings. */
+  async getListings(): Promise<{ name: string; seller: string; priceShyft: number; createdAt: number }[]> {
+    const all = await (this.program.account as any).listing.all();
+    return all.map((l: any) => ({
+      name: l.account.name,
+      seller: l.account.seller.toBase58(),
+      priceShyft: Number(l.account.price) / 1_000_000,
+      createdAt: Number(l.account.createdAt),
+    }));
   }
 
   async getProfile(owner: PublicKey): Promise<any> {

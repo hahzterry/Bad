@@ -1,6 +1,6 @@
 "use client";
 
-import { Shield, Newspaper, MessageCircle, Wallet, User, Lock, BarChart3, Users, Sun, Moon, Coins, Globe, CandlestickChart, Flame } from "lucide-react";
+import { Shield, Newspaper, MessageCircle, Wallet, User, Lock, BarChart3, Users, Sun, Moon, Coins, Globe, CandlestickChart, Flame, ShoppingBag } from "lucide-react";
 import { useAppStore } from "@/lib/store";
 
 const navItems = [
@@ -12,6 +12,7 @@ const navItems = [
   { id: "communities", label: "Communities", icon: Globe },
   { id: "quests", label: "Quests", icon: Flame },
   { id: "payments", label: "Payments", icon: Wallet },
+  { id: "market", label: "Market", icon: ShoppingBag },
   { id: "dashboard", label: "Dashboard", icon: BarChart3 },
   { id: "profile", label: "Profile", icon: User },
 ];
