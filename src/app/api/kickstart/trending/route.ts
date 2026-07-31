@@ -119,6 +119,51 @@ async function fetchDexScreener(mints: string[]): Promise<Record<string, any>> {
   return result;
 }
 
+type TokenMeta = { name?: string; symbol?: string; image?: string };
+
+/**
+ * Name/symbol/image straight from the mint's metadata via Helius DAS, for
+ * launches too new to have a DEX pair. Best-effort: any failure just leaves
+ * the placeholder in place rather than failing the whole response.
+ */
+async function fetchOnChainMetadata(
+  mints: string[],
+): Promise<Record<string, TokenMeta>> {
+  const key = process.env.HELIUS_API_KEY_PRIVATE || process.env.HELIUS_API_KEY;
+  if (!key) return {};
+  try {
+    const resp = await fetch(`https://mainnet.helius-rpc.com/?api-key=${key}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "kickstart-meta",
+        method: "getAssetBatch",
+        params: { ids: mints.slice(0, 100) },
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!resp.ok) return {};
+    const json = await resp.json();
+    const out: Record<string, TokenMeta> = {};
+    for (const asset of json?.result ?? []) {
+      if (!asset?.id) continue;
+      const md = asset.content?.metadata ?? {};
+      out[asset.id] = {
+        name: md.name || undefined,
+        symbol: md.symbol || undefined,
+        image:
+          asset.content?.links?.image ||
+          asset.content?.files?.[0]?.uri ||
+          undefined,
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 export async function GET(req: NextRequest) {
   if (!isAllowedOrigin(req)) {
     return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 403 });
@@ -137,13 +182,20 @@ export async function GET(req: NextRequest) {
 
     const dex = await fetchDexScreener(mints);
 
+    // Fresh launches usually have no DEX pair yet, so DexScreener knows
+    // nothing about them and every one would render as "Unknown". Their
+    // on-chain metadata exists from mint, so fall back to that for names.
+    const unlisted = mints.filter((m) => !dex[m]);
+    const meta = unlisted.length ? await fetchOnChainMetadata(unlisted) : {};
+
     const enriched: TrendingToken[] = mints.map((mint) => {
       const p = dex[mint];
+      const m = meta[mint];
       return {
         tokenMint: mint,
-        name: p?.baseToken?.name || p?.baseToken?.symbol || "Unknown",
-        symbol: p?.baseToken?.symbol || "?",
-        image: p?.info?.imageUrl || p?.info?.openGraph || "",
+        name: p?.baseToken?.name || p?.baseToken?.symbol || m?.name || "Unknown",
+        symbol: p?.baseToken?.symbol || m?.symbol || "?",
+        image: p?.info?.imageUrl || p?.info?.openGraph || m?.image || "",
         status: undefined,
         priceUsd: p?.priceUsd ? Number(p.priceUsd) : undefined,
         priceChange24h: p?.priceChange?.h24 != null ? Number(p.priceChange.h24) : undefined,
@@ -171,7 +223,13 @@ export async function GET(req: NextRequest) {
     const seen = new Set<string>();
     const dedupe = (list: TrendingToken[]) =>
       list.filter((t) => {
-        const key = `${(t.symbol || "").toLowerCase().trim()}|${(t.name || "").toLowerCase().trim()}`;
+        const symbol = (t.symbol || "").toLowerCase().trim();
+        const name = (t.name || "").toLowerCase().trim();
+        // Launches with no metadata all share the placeholder symbol/name, so
+        // keying on those collapses every unidentified launch into one row.
+        // Fall back to the mint, which is unique by definition.
+        const identified = symbol && symbol !== "?" && name && name !== "unknown";
+        const key = identified ? `${symbol}|${name}` : t.tokenMint;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
