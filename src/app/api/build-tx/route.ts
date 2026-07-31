@@ -169,10 +169,34 @@ function getTreasuryKeypair(): Keypair {
 }
 
 // ========== Rate Limiting ==========
+//
+// Two things are being protected, and they need different limits:
+//
+//  1. Ordinary social actions (post/like/comment/follow). These are cheap and
+//     users legitimately do a dozen in a sitting, so the cap is per WALLET and
+//     generous. The old flat 5/min blocked real users mid-task — an activation
+//     campaign asks for 12 actions a day.
+//  2. Sponsored ACCOUNT CREATION, which spends treasury SOL on rent and is the
+//     actual drain vector. That stays tight, and is capped per IP because a
+//     wallet only ever creates one profile — per-wallet limits can't see the
+//     attack.
+//
+// IP limits are deliberately loose: carrier-grade NAT puts large numbers of
+// unrelated mobile users behind one address, so a tight per-IP cap throttles
+// households, cafes and whole mobile networks rather than attackers.
 const ipTimestamps = new Map<string, number[]>();
 const walletTimestamps = new Map<string, number[]>();
+const signupIpTimestamps = new Map<string, number[]>();
+
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = 5;
+const WALLET_MAX_PER_MIN = 20;
+const IP_MAX_PER_MIN = 60;
+
+/** Account-creating actions: treasury pays rent, so these get their own cap. */
+const SIGNUP_ACTIONS = new Set(["createProfile", "claimUsername"]);
+const SIGNUP_WINDOW_MS = 3_600_000; // 1 hour
+const SIGNUP_MAX_PER_IP = 20; // ~10 signups/hour/IP (a signup is 2 calls)
+
 const MIN_TREASURY_RESERVE = 100_000_000; // 0.1 SOL
 
 function getClientIp(request: NextRequest): string {
@@ -183,14 +207,40 @@ function getClientIp(request: NextRequest): string {
   );
 }
 
-function isRateLimited(key: string, store: Map<string, number[]>): boolean {
+/**
+ * Sliding-window counter. Records the hit when it allows one, so callers
+ * should check the cheapest/tightest limit first.
+ */
+function isRateLimited(
+  key: string,
+  store: Map<string, number[]>,
+  max: number,
+  windowMs: number,
+): boolean {
   const now = Date.now();
-  const timestamps = (store.get(key) || []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
-  store.set(key, timestamps);
-  if (timestamps.length >= RATE_LIMIT_MAX) return true;
+  const timestamps = (store.get(key) || []).filter((t) => now - t < windowMs);
+  if (timestamps.length >= max) {
+    store.set(key, timestamps);
+    return true;
+  }
   timestamps.push(now);
   store.set(key, timestamps);
   return false;
+}
+
+// Keys accumulate forever otherwise — one entry per wallet/IP ever seen.
+let sweepCounter = 0;
+function sweepRateLimitStores() {
+  if (++sweepCounter % 500 !== 0) return;
+  const now = Date.now();
+  const prune = (store: Map<string, number[]>, windowMs: number) => {
+    for (const [key, ts] of store) {
+      if (!ts.some((t) => now - t < windowMs)) store.delete(key);
+    }
+  };
+  prune(ipTimestamps, RATE_LIMIT_WINDOW_MS);
+  prune(walletTimestamps, RATE_LIMIT_WINDOW_MS);
+  prune(signupIpTimestamps, SIGNUP_WINDOW_MS);
 }
 
 const ALLOWED_ORIGINS = new Set([
@@ -446,7 +496,11 @@ const actions: Record<string, ActionHandler> = {
 
   async closeComment(params, user, treasury, program) {
     const { postAuthor, postId, commentIndex } = params;
-    if (!postAuthor || postId === undefined || commentIndex === undefined) throw new Error("Missing params");
+    // NaN from a client serialises to null over JSON, which slips past an
+    // `=== undefined` check and only fails later inside BigInt(). Require a
+    // real finite number so the error names the actual problem.
+    if (!postAuthor || !Number.isFinite(Number(postId)) || !Number.isFinite(Number(commentIndex)))
+      throw new Error("Missing or invalid params");
     const postAuthorPk = new PublicKey(postAuthor);
     const [postPda] = getPostPda(postAuthorPk, postId);
     const [commentPda] = getCommentPda(postPda, commentIndex);
@@ -779,11 +833,32 @@ export async function POST(request: NextRequest) {
 
     // ── 3. RATE LIMIT ──
     const clientIp = getClientIp(request);
-    if (isRateLimited(clientIp, ipTimestamps)) {
-      return NextResponse.json({ error: "Rate limited" }, { status: 429 });
+    sweepRateLimitStores();
+
+    // Tightest first: creating sponsored accounts costs the treasury rent.
+    const isSignup = requestedActions.some((r) => SIGNUP_ACTIONS.has(r.action));
+    if (
+      isSignup &&
+      isRateLimited(clientIp, signupIpTimestamps, SIGNUP_MAX_PER_IP, SIGNUP_WINDOW_MS)
+    ) {
+      console.warn(`⛔ signup rate limit hit from IP ${clientIp}`);
+      return NextResponse.json(
+        { error: "Too many new accounts from this network. Try again later." },
+        { status: 429, headers: { "Retry-After": "3600" } },
+      );
     }
-    if (isRateLimited(walletAddress, walletTimestamps)) {
-      return NextResponse.json({ error: "Rate limited" }, { status: 429 });
+
+    if (isRateLimited(clientIp, ipTimestamps, IP_MAX_PER_MIN, RATE_LIMIT_WINDOW_MS)) {
+      return NextResponse.json(
+        { error: "Rate limited" },
+        { status: 429, headers: { "Retry-After": "60" } },
+      );
+    }
+    if (isRateLimited(walletAddress, walletTimestamps, WALLET_MAX_PER_MIN, RATE_LIMIT_WINDOW_MS)) {
+      return NextResponse.json(
+        { error: "Rate limited" },
+        { status: 429, headers: { "Retry-After": "60" } },
+      );
     }
 
     const connection = new Connection(RPC_URL, "confirmed");
