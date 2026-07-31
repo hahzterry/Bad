@@ -124,19 +124,44 @@ export async function queryDeviceBits(
   }
 }
 
-/** Mark a device as rewarded. Call this only once the payout has gone out. */
-export async function markDeviceRewarded(
+/**
+ * Write both bits.
+ *
+ * Apple has no partial update — one call sets bit0 and bit1 together — so
+ * callers pass the full intended state, never just the bit they care about.
+ *
+ *   bit0 = device has been rewarded (permanent, survives factory reset)
+ *   bit1 = device currently holds a campaign slot
+ */
+export async function setDeviceBits(
   deviceToken: string,
+  bit0: boolean,
+  bit1: boolean,
 ): Promise<{ ok: boolean; detail?: string }> {
   if (!isDeviceCheckConfigured()) return { ok: false, detail: "unconfigured" };
   try {
     const { ok, status, text } = await call("/v1/update_two_bits", {
       device_token: deviceToken,
-      bit0: true,
-      bit1: false,
+      bit0,
+      bit1,
     });
     return ok ? { ok: true } : { ok: false, detail: `${status} ${text}` };
   } catch (err) {
     return { ok: false, detail: (err as Error).message };
   }
+}
+
+/** Mark a device rewarded and release its slot. Only after a payout is sent. */
+export async function markDeviceRewarded(deviceToken: string) {
+  return setDeviceBits(deviceToken, true, false);
+}
+
+/** Claim the device for an active slot. This is what blocks re-joining. */
+export async function markDeviceHoldsSlot(deviceToken: string) {
+  return setDeviceBits(deviceToken, false, true);
+}
+
+/** Free the device without rewarding it — rejection or admin cleanup. */
+export async function releaseDeviceSlot(deviceToken: string) {
+  return setDeviceBits(deviceToken, false, false);
 }

@@ -11,7 +11,11 @@ import {
   clientIp,
   CampaignConfigError,
 } from "@/lib/campaign";
-import { queryDeviceBits, isDeviceCheckConfigured } from "@/lib/devicecheck";
+import {
+  queryDeviceBits,
+  isDeviceCheckConfigured,
+  markDeviceHoldsSlot,
+} from "@/lib/devicecheck";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -55,6 +59,16 @@ export async function POST(req: NextRequest) {
           { status: 403 },
         );
       }
+      // bit1 = this physical iPhone already holds a slot. Checked because a
+      // reinstall gives a fresh IDFV and a brand new embedded wallet, so
+      // neither the device id nor the wallet can catch a repeat entry — only
+      // Apple's device-bound bit survives that.
+      if (check.state === "ok" && check.bits.bit1) {
+        return NextResponse.json(
+          { ok: false, error: "device_already_joined" },
+          { status: 403 },
+        );
+      }
       if (check.state === "invalid_token") {
         console.warn("campaign/join: invalid DeviceCheck token", check.detail);
         return NextResponse.json(
@@ -86,6 +100,13 @@ export async function POST(req: NextRequest) {
         { ok: false, error: "campaign_full" },
         { status: 410 },
       );
+    }
+
+    // Claim the device only once the slot is actually held, so a failed
+    // reservation can't leave a device permanently locked out.
+    if (result === "claimed" && deviceToken && isDeviceCheckConfigured()) {
+      const marked = await markDeviceHoldsSlot(deviceToken);
+      if (!marked.ok) console.warn("campaign/join: bit1 not set —", marked.detail);
     }
 
     return NextResponse.json({ ok: true, result, slot });

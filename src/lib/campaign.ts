@@ -9,7 +9,11 @@
 
 import { SOCIAL_ACTIONS, dayKey } from "./quests";
 import { loadSocial, runSocialTally, type SocialWallet } from "./quests-engine";
-import { markDeviceRewarded } from "./devicecheck";
+import {
+  markDeviceRewarded,
+  releaseDeviceSlot,
+  queryDeviceBits,
+} from "./devicecheck";
 
 // ────────────────────────────────────────────────────────────────────────
 // Config
@@ -316,6 +320,9 @@ export async function reviewSlot(
   if (!slot) return { ok: false, error: "not_found" };
 
   if (decision.action === "reject") {
+    // Free the device so a rejected user isn't locked out of a future
+    // campaign — bit1 means "holds a slot", and they no longer do.
+    if (slot.deviceToken) await releaseDeviceSlot(slot.deviceToken);
     const updated: SlotRecord = {
       ...slot,
       status: "rejected",
@@ -339,6 +346,13 @@ export async function reviewSlot(
 
   let deviceMarked: string | undefined;
   if (slot.deviceToken) {
+    // Ask Apple whether this physical device was already rewarded. Slot
+    // records can't answer that — a reinstall produces a new device id and a
+    // new wallet, so two records may be the same phone.
+    const bits = await queryDeviceBits(slot.deviceToken);
+    if (bits.state === "ok" && bits.bits.bit0) {
+      return { ok: false, error: "device_already_rewarded" };
+    }
     const res = await markDeviceRewarded(slot.deviceToken);
     deviceMarked = res.ok ? undefined : `devicecheck: ${res.detail}`;
   }
