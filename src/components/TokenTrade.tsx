@@ -13,8 +13,9 @@ import {
 } from "lucide-react";
 import { useWallet, pollConfirmation, getSharedConnection } from "@/hooks/usePrivyWallet";
 import { toast } from "@/components/Toast";
-import { VersionedTransaction } from "@solana/web3.js";
+import { VersionedTransaction, Transaction } from "@solana/web3.js";
 import { SOL_MINT, formatSOL } from "@/lib/bags";
+import { resolvePool, quote as shyftQuote, buildSwapTx as shyftSwapTx } from "@/lib/launchpad";
 
 interface TokenTradeProps {
   tokenMint: string;
@@ -27,11 +28,16 @@ interface TokenTradeProps {
   /** Show Bags.fm links/attribution. Set false for non-Bags tokens (e.g. xStocks). */
   showBagsLinks?: boolean;
   /**
-   * Which router to quote/swap through. Defaults to auto: pump.fun mints
-   * (ending in "pump") route via Jupiter since Bags can't price them;
-   * everything else goes through Bags.
+   * Which router to quote/swap through. Defaults to auto: tokens launched on
+   * Shyft route through our own bonding curve (and follow it to DAMM v2 after
+   * graduation), pump.fun mints go via Jupiter, everything else via Bags.
    */
-  provider?: "bags" | "jupiter" | "auto";
+  provider?: "bags" | "jupiter" | "shyft" | "auto";
+  /**
+   * Shyft pool address. Optional — when omitted the component asks the server
+   * whether this mint is one of ours, so existing call sites need no changes.
+   */
+  pool?: string;
 }
 
 function friendlyError(msg: string): string {
@@ -58,6 +64,7 @@ export default function TokenTrade({
   decimals: decimalsProp,
   showBagsLinks = true,
   provider = "auto",
+  pool: poolProp,
 }: TokenTradeProps) {
   const { publicKey, signTransaction } = useWallet();
 
@@ -65,6 +72,13 @@ export default function TokenTrade({
   const isPumpToken = tokenMint.endsWith("pump");
   const useJupiter = provider === "jupiter" || (provider === "auto" && isPumpToken);
   const tradeApi = useJupiter ? "/api/jup" : "/api/bags";
+
+  // Shyft-launched tokens trade on our own curve. Bags and Jupiter can't price
+  // a fresh DBC pool, and after graduation only our route knows to follow the
+  // token to its DAMM v2 pool — so resolve that first and take priority.
+  const [shyftPool, setShyftPool] = useState<string | null>(poolProp ?? null);
+  const [graduated, setGraduated] = useState(false);
+  const useShyft = provider === "shyft" || (provider === "auto" && !!shyftPool);
   // Decimals must match the mint exactly — a wrong guess mis-scales both the
   // quote amount and the displayed output by orders of magnitude. Start from
   // an explicit prop or a heuristic, then resolve the real value on-chain below.
@@ -150,6 +164,26 @@ export default function TokenTrade({
     fetchBalance();
   }, [mode, publicKey, tokenMint]);
 
+  // Ask once whether this mint is a Shyft launch (and where it trades now).
+  useEffect(() => {
+    if (poolProp || provider === "jupiter" || provider === "bags") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await resolvePool(tokenMint);
+        if (cancelled || !r.isShyftToken) return;
+        setShyftPool(r.pool);
+        setGraduated(r.graduated);
+        setDecimals(r.decimals);
+      } catch {
+        /* not a Shyft token, or lookup failed — fall through to Bags/Jupiter */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tokenMint, poolProp, provider]);
+
   // Get a quote when amount changes
   useEffect(() => {
     if (!amount || Number(amount) <= 0) {
@@ -161,6 +195,36 @@ export default function TokenTrade({
       setQuoting(true);
       setError("");
       try {
+        if (useShyft && shyftPool) {
+          const inDecimals = mode === "buy" ? 9 : decimals;
+          const amountIn = Math.floor(Number(amount) * Math.pow(10, inDecimals)).toString();
+          const q = await shyftQuote({
+            pool: shyftPool,
+            amountIn,
+            swapBaseForQuote: mode === "sell",
+            slippageBps: 300,
+          });
+          setGraduated(q.graduated);
+          // Normalise onto the field names the quote panel already renders,
+          // keeping the raw values the swap call needs.
+          setQuote({
+            ...q,
+            __shyft: true,
+            amountIn,
+            outAmount: q.amountOut,
+            minOutAmount: q.minimumAmountOut,
+          });
+          // A buy bigger than the curve's remaining room is reduced rather than
+          // rejected — tell the user instead of silently trading less.
+          if (q.cappedTo) {
+            setError(
+              `Only ${(Number(q.cappedTo) / 1e9).toFixed(4)} SOL left before this token graduates — your buy was reduced to that.`,
+            );
+          }
+          setQuoting(false);
+          return;
+        }
+
         const inputMint = mode === "buy" ? SOL_MINT : tokenMint;
         const outputMint = mode === "buy" ? tokenMint : SOL_MINT;
         // Buy-side input is always SOL (9 decimals); sell-side input is the token
@@ -183,7 +247,7 @@ export default function TokenTrade({
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [amount, mode, tokenMint, decimals]);
+  }, [amount, mode, tokenMint, decimals, useShyft, shyftPool]);
 
   const handleTrade = async () => {
     if (!publicKey || !signTransaction || !quote) return;
@@ -191,21 +255,36 @@ export default function TokenTrade({
     setError("");
 
     try {
-      const res = await fetch(tradeApi, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "swap", quoteResponse: quote, userPublicKey: publicKey.toBase58() }),
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error);
-
-      const tx = VersionedTransaction.deserialize(
-        Buffer.from(data.response.unsignedTxBase64, "base64")
-      );
-      const signed = await signTransaction(tx);
-
       const connection = getSharedConnection();
-      const sig = await connection.sendRawTransaction(signed.serialize());
+      let sig: string;
+
+      if (quote.__shyft && shyftPool) {
+        // Our route returns a legacy Transaction the user signs as fee payer.
+        const { transaction } = await shyftSwapTx({
+          wallet: publicKey.toBase58(),
+          pool: shyftPool,
+          amountIn: quote.amountIn,
+          minimumAmountOut: quote.minimumAmountOut,
+          swapBaseForQuote: mode === "sell",
+        });
+        const signed = await signTransaction(Transaction.from(Buffer.from(transaction, "base64")));
+        sig = await connection.sendRawTransaction(signed.serialize());
+      } else {
+        const res = await fetch(tradeApi, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "swap", quoteResponse: quote, userPublicKey: publicKey.toBase58() }),
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error);
+
+        const tx = VersionedTransaction.deserialize(
+          Buffer.from(data.response.unsignedTxBase64, "base64")
+        );
+        const signed = await signTransaction(tx);
+        sig = await connection.sendRawTransaction(signed.serialize());
+      }
+
       await pollConfirmation(connection, sig);
 
       // Report the confirmed swap for season quest points (fire-and-forget —
@@ -216,7 +295,7 @@ export default function TokenTrade({
         body: JSON.stringify({ wallet: publicKey.toBase58(), signature: sig }),
       }).catch(() => {});
 
-      toast("success", `${mode === "buy" ? "Bought" : "Sold"} ${tokenSymbol} successfully! 🎉`);
+      toast("success", `${mode === "buy" ? "Bought" : "Sold"} $${tokenSymbol}`);
       setAmount("");
       setQuote(null);
     } catch (err: any) {
@@ -380,6 +459,14 @@ export default function TokenTrade({
               <span className="text-[#64748B]">Route</span>
               <span className="text-[#475569]">
                 {quote.routePlan.map((leg: any) => leg.venue).join(" → ")}
+              </span>
+            </div>
+          )}
+          {quote.__shyft && (
+            <div className="flex justify-between text-xs">
+              <span className="text-[#64748B]">Route</span>
+              <span className="text-[#475569]">
+                {graduated ? "Shyft → DAMM v2" : "Shyft bonding curve"}
               </span>
             </div>
           )}

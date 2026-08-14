@@ -1149,7 +1149,7 @@ export function OnChainPostCard({
           onClose={() => setShowLaunch(false)}
           onSuccess={async (mint) => {
             setShowLaunch(false);
-            toast("success", "Your post is now a coin! 🪙", "Live on Solana");
+            toast("success", "Your post is now a coin", "Live on Solana");
             // Tag the post on-chain with the mint so the token card shows for everyone.
             try {
               const base = localContent ?? post.content;

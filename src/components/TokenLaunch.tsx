@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import {
-  Rocket,
+  Plus,
   Coins,
   X,
   Loader2,
@@ -21,8 +21,25 @@ import {
 import { useWallet, pollConfirmation, getSharedConnection } from "@/hooks/usePrivyWallet";
 import { toast } from "@/components/Toast";
 import { uploadImage } from "@/components/RichContent";
-import { VersionedTransaction, PublicKey } from "@solana/web3.js";
+import { VersionedTransaction, Transaction, PublicKey } from "@solana/web3.js";
 import { BAGS_REF_CODE, resolveFeeWallet, type FeeProvider, type ResolvedFeeWallet } from "@/lib/bags";
+import {
+  LAUNCHPAD,
+  LAUNCHPAD_TERMS,
+  LAUNCH_RENT_SOL,
+  uploadMetadata,
+  buildLaunchTx,
+} from "@/lib/launchpad";
+import { buildKickstartLaunch, sendKickstartLaunch } from "@/lib/easya";
+
+/**
+ * Which launchpad launches go through:
+ *   "shyft"  — our own Meteora DBC config; fees come to the Shyft treasury
+ *   "easya"  — EasyA Kickstart, where $SHYFT itself launched; fees go to EasyA
+ *   "bags"   — the original Bags.fm path, kept for rollback
+ */
+const USE_EASYA = LAUNCHPAD === "easya";
+const USE_SHYFT_LAUNCHPAD = LAUNCHPAD !== "bags" && !USE_EASYA;
 
 const FEE_PROVIDERS: { value: FeeProvider; label: string }[] = [
   { value: "twitter", label: "X / Twitter" },
@@ -165,6 +182,112 @@ export default function TokenLaunch({ onClose, onSuccess, username, prefill }: T
     setUploadingImage(false);
   };
 
+  /**
+   * Launch on Shyft's own bonding curve.
+   *
+   * Two steps instead of Bags' four: pin the metadata, then sign ONE
+   * transaction that creates the pool and — if an initial buy was entered —
+   * buys in the same breath, so no sniper can take the first entry. The
+   * creator funds it themselves; only trading is sponsored. Being the pool's
+   * on-chain creator is what entitles them to their share of trading fees.
+   */
+  const launchOnShyft = async () => {
+    if (!publicKey || !signTransaction) return;
+    setStep("creating");
+
+    try {
+      const { uri } = await uploadMetadata({
+        name,
+        symbol,
+        description,
+        imageUrl,
+        twitter: twitter || undefined,
+        website: website || undefined,
+      });
+
+      setStep("launching");
+
+      const { transaction, tokenMint } = await buildLaunchTx({
+        wallet: publicKey.toBase58(),
+        name,
+        symbol,
+        uri,
+        firstBuyLamports: String(Math.floor(Number(initialBuy || 0) * 1e9)),
+      });
+
+      toast("info", "Approve to launch your token...");
+
+      // The treasury and mint keypair already signed server-side; the creator's
+      // signature is the last one missing, so this is a legacy Transaction.
+      const tx = Transaction.from(Buffer.from(transaction, "base64"));
+      const signed = await signTransaction(tx);
+
+      const connection = getSharedConnection();
+      const sig = await connection.sendRawTransaction(signed.serialize());
+      await pollConfirmation(connection, sig);
+
+      setResult({ tokenMint, metadataUrl: uri });
+      setStep("success");
+      toast("success", "Token launched");
+      onSuccess?.(tokenMint);
+    } catch (err: any) {
+      console.error("Shyft launch error:", err);
+      const msg = friendlyError(err.message);
+      setError(msg);
+      setStep("form");
+      toast("error", msg);
+    }
+  };
+
+  /**
+   * Launch on EasyA Kickstart.
+   *
+   * Kickstart builds and broadcasts; we only add the creator's signature. The
+   * transaction must be signed exactly as received — rebuilding it or adding
+   * instructions invalidates the signature EasyA already attached.
+   */
+  const launchOnKickstart = async () => {
+    if (!publicKey || !signTransaction) return;
+    setStep("launching");
+
+    try {
+      const { transaction, tokenMint, metadataUrl } = await buildKickstartLaunch({
+        wallet: publicKey.toBase58(),
+        name,
+        symbol,
+        imageUrl,
+        description: description || undefined,
+        website: website || undefined,
+        twitter: twitter || undefined,
+        initialBuySol: Number(initialBuy || 0) || undefined,
+      });
+
+      toast("info", "Approve to launch your token...");
+
+      const tx = Transaction.from(Buffer.from(transaction, "base64"));
+      const signed = await signTransaction(tx);
+      // Their blockhash expires in ~1 minute, so hand it straight back.
+      await sendKickstartLaunch({
+        signedTransaction: signed
+          .serialize({ requireAllSignatures: false, verifySignatures: false })
+          .toString("base64"),
+        mint: tokenMint,
+        wallet: publicKey.toBase58(),
+      });
+
+      setResult({ tokenMint, metadataUrl });
+      setStep("success");
+      toast("success", "Token launched on Kickstart");
+      onSuccess?.(tokenMint);
+    } catch (err: any) {
+      console.error("Kickstart launch error:", err);
+      const msg = friendlyError(err.message);
+      setError(msg);
+      setStep("form");
+      toast("error", msg);
+    }
+  };
+
   const handleLaunch = async () => {
     if (!publicKey || !signTransaction || !signAllTransactions) {
       toast("error", "Connect your wallet first");
@@ -176,6 +299,15 @@ export default function TokenLaunch({ onClose, onSuccess, username, prefill }: T
     }
 
     setError("");
+
+    if (USE_EASYA) {
+      await launchOnKickstart();
+      return;
+    }
+    if (USE_SHYFT_LAUNCHPAD) {
+      await launchOnShyft();
+      return;
+    }
 
     // Resolve the fee split up front so a bad recipient fails before any tx.
     let feeClaimers: Array<{ wallet: string; bps: number }>;
@@ -265,7 +397,7 @@ export default function TokenLaunch({ onClose, onSuccess, username, prefill }: T
 
       setResult({ tokenMint, metadataUrl });
       setStep("success");
-      toast("success", "Token launched successfully! 🚀");
+      toast("success", "Token launched");
       onSuccess?.(tokenMint);
     } catch (err: any) {
       console.error("Token launch error:", err);
@@ -283,11 +415,17 @@ export default function TokenLaunch({ onClose, onSuccess, username, prefill }: T
         <div className="flex items-center justify-between p-5 border-b border-[#E2E8F0]">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#2563EB] to-[#7C3AED] flex items-center justify-center">
-              <Rocket className="w-5 h-5 text-white" />
+              <Plus className="w-5 h-5 text-white" />
             </div>
             <div>
               <h2 className="text-lg font-bold text-[#1A1A2E]">Launch Creator Token</h2>
-              <p className="text-xs text-[#64748B]">Powered by Bags.fm</p>
+              <p className="text-xs text-[#64748B]">
+                {USE_EASYA
+                  ? "Powered by EasyA Kickstart"
+                  : USE_SHYFT_LAUNCHPAD
+                    ? `${LAUNCHPAD_TERMS.tradeFeePercent}% trading fee · you earn ${LAUNCHPAD_TERMS.creatorPercentOfVolume}% of volume`
+                    : "Powered by Bags.fm"}
+              </p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-[#F1F5F9] rounded-lg transition">
@@ -301,7 +439,7 @@ export default function TokenLaunch({ onClose, onSuccess, username, prefill }: T
             <div className="w-16 h-16 rounded-full bg-[#F0FDF4] flex items-center justify-center mx-auto mb-4">
               <CheckCircle2 className="w-8 h-8 text-[#16A34A]" />
             </div>
-            <h3 className="text-xl font-bold text-[#1A1A2E] mb-2">Token Launched! 🎉</h3>
+            <h3 className="text-xl font-bold text-[#1A1A2E] mb-2">Token Launched</h3>
             <p className="text-sm text-[#64748B] mb-4">Your creator token is now live on Solana</p>
 
             <div className="bg-[#F8FAFC] rounded-xl p-4 mb-4 text-left border border-[#E2E8F0]">
@@ -319,12 +457,18 @@ export default function TokenLaunch({ onClose, onSuccess, username, prefill }: T
 
             <div className="flex gap-2">
               <a
-                href={`https://bags.fm/${result.tokenMint}`}
+                href={
+                  USE_EASYA
+                    ? `https://kickstart.easya.io/token/${result.tokenMint}`
+                    : USE_SHYFT_LAUNCHPAD
+                      ? `https://dexscreener.com/solana/${result.tokenMint}`
+                      : `https://bags.fm/${result.tokenMint}`
+                }
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 bg-[#2563EB] text-white rounded-xl font-medium text-sm hover:bg-[#1D4ED8] transition"
               >
-                View on Bags <ExternalLink className="w-4 h-4" />
+                {USE_EASYA ? "View on Kickstart" : USE_SHYFT_LAUNCHPAD ? "View chart" : "View on Bags"} <ExternalLink className="w-4 h-4" />
               </a>
               <button
                 onClick={onClose}
@@ -345,8 +489,12 @@ export default function TokenLaunch({ onClose, onSuccess, username, prefill }: T
             </h3>
             <p className="text-sm text-[#64748B]">
               {step === "creating"
-                ? "Setting up your token on Bags.fm"
-                : "Deploying to Solana — please approve the transaction"}
+                ? USE_SHYFT_LAUNCHPAD
+                  ? "Pinning your token's metadata to IPFS"
+                  : "Setting up your token on Bags.fm"
+                : USE_EASYA
+                  ? "Building your launch on Kickstart — please approve the transaction"
+                  : "Deploying to Solana — please approve the transaction"}
             </p>
           </div>
         )}
@@ -366,7 +514,7 @@ export default function TokenLaunch({ onClose, onSuccess, username, prefill }: T
               <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-xl">
                 <Coins className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                 <span className="text-xs text-amber-700">
-                  We filled this in from your post — just review the name & symbol and launch. 🪙
+                  We filled this in from your post — review the name and symbol, then launch.
                 </span>
               </div>
             )}
@@ -481,10 +629,14 @@ export default function TokenLaunch({ onClose, onSuccess, username, prefill }: T
               </div>
             </div>
 
-            {/* Initial Buy */}
+            {/* Initial Buy — available on both launchpads */}
             <div>
               <label className="text-xs font-medium text-[#64748B] mb-1.5 block">Initial Buy (SOL) — optional</label>
-              <p className="text-[10px] text-[#94A3B8] mb-2">Buy some of your own token at launch. Set to 0 if you don't want to.</p>
+              <p className="text-[10px] text-[#94A3B8] mb-2">
+                {USE_SHYFT_LAUNCHPAD
+                  ? "Buy your own token in the same transaction as the launch, so nobody can get in before you. Set to 0 to skip."
+                  : "Buy some of your own token at launch. Set to 0 if you don't want to."}
+              </p>
               <div className="flex items-center gap-2 bg-[#F8FAFC] border border-[#E2E8F0] rounded-xl px-4 py-2.5">
                 <DollarSign className="w-4 h-4 text-[#94A3B8]" />
                 <input
@@ -499,6 +651,12 @@ export default function TokenLaunch({ onClose, onSuccess, username, prefill }: T
               </div>
             </div>
 
+            {/*
+              A custom fee recipient is Bags-only — Shyft's config fixes the
+              split on-chain, so offering a choice would imply otherwise.
+            */}
+            {!USE_SHYFT_LAUNCHPAD && (
+            <>
             {/* Fee Recipient */}
             <div>
               <label className="text-xs font-medium text-[#64748B] mb-1.5 block">Trading Fee Recipient</label>
@@ -637,13 +795,31 @@ export default function TokenLaunch({ onClose, onSuccess, username, prefill }: T
                 </div>
               )}
             </div>
+            </>
+            )}
 
             {/* Info Banner */}
             <div className="flex items-start gap-2 p-3 bg-[#EFF6FF] border border-[#BFDBFE] rounded-xl">
               <Info className="w-4 h-4 text-[#2563EB] shrink-0 mt-0.5" />
               <div className="text-xs text-[#1D4ED8]">
                 <p className="font-medium mb-0.5">How it works</p>
-                <p className="text-[#3B82F6]">Your token launches on Bags.fm with a bonding curve. When people trade your token, you earn fees forever.</p>
+                {USE_SHYFT_LAUNCHPAD ? (
+                  <p className="text-[#3B82F6]">
+                    {LAUNCHPAD_TERMS.totalSupply.toLocaleString()} tokens go straight onto a bonding
+                    curve. Every trade pays a {LAUNCHPAD_TERMS.tradeFeePercent}% fee, of which you
+                    earn {LAUNCHPAD_TERMS.creatorFeeShare}% — {LAUNCHPAD_TERMS.creatorPercentOfVolume}%
+                    of everything traded, forever. At {LAUNCHPAD_TERMS.graduationSol} SOL raised your
+                    token graduates to {LAUNCHPAD_TERMS.migratesTo} with locked liquidity.
+                  </p>
+                ) : USE_EASYA ? (
+                  <p className="text-[#3B82F6]">
+                    Your token launches on EasyA Kickstart — the same launchpad $SHYFT launched on —
+                    with a bonding curve. Your initial buy happens in the same transaction, so nobody
+                    can get in before you. You earn a share of every trade.
+                  </p>
+                ) : (
+                  <p className="text-[#3B82F6]">Your token launches on Bags.fm with a bonding curve. When people trade your token, you earn fees forever.</p>
+                )}
               </div>
             </div>
 
@@ -653,11 +829,17 @@ export default function TokenLaunch({ onClose, onSuccess, username, prefill }: T
               disabled={!name || !symbol || !description || !imageUrl || !publicKey}
               className="w-full py-3 px-4 bg-gradient-to-r from-[#2563EB] to-[#7C3AED] text-white rounded-xl font-semibold text-sm hover:opacity-90 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
-              <Rocket className="w-4 h-4" />
-              Launch Token on Bags
+              <Plus className="w-4 h-4" />
+              {USE_EASYA ? "Launch on Kickstart" : USE_SHYFT_LAUNCHPAD ? "Launch Token" : "Launch Token on Bags"}
             </button>
             <p className="text-center text-[10px] text-[#94A3B8] mt-2">
-              You pay the one-time launch cost (~0.02 SOL network + rent){Number(initialBuy) > 0 ? ` + ${initialBuy} SOL initial buy` : ""} from your wallet.
+              {USE_EASYA ? (
+                `You pay the one-time launch cost (~${LAUNCH_RENT_SOL} SOL of network rent)${Number(initialBuy) > 0 ? ` + your ${initialBuy} SOL initial buy` : ""} from your wallet.`
+              ) : USE_SHYFT_LAUNCHPAD ? (
+                `You pay the one-time launch cost (~${LAUNCH_RENT_SOL} SOL of network rent) from your wallet.`
+              ) : (
+                <>You pay the one-time launch cost (~0.02 SOL network + rent){Number(initialBuy) > 0 ? ` + ${initialBuy} SOL initial buy` : ""} from your wallet.</>
+              )}
             </p>
           </div>
         )}
