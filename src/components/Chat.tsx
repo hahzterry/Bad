@@ -18,8 +18,19 @@ import {
   EyeOff,
   Check,
   Loader2,
+  Phone,
+  Video,
+  PhoneOff,
+  PhoneIncoming,
+  Trash2,
 } from "lucide-react";
+import CallModal from "@/components/CallModal";
+
+function getCallRoomName(a: string, b: string): string {
+  return [a, b].sort().join("_call_");
+}
 import { useProgram } from "@/hooks/useProgram";
+import { handleIpfsImgError } from "@/components/RichContent";
 import { toast } from "@/components/Toast";
 import { useWallet } from "@/hooks/usePrivyWallet";
 import { PublicKey } from "@solana/web3.js";
@@ -97,6 +108,49 @@ export default function Chat() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const keyPublishedChats = useRef(new Set<number>());
 
+  // ── MagicBlock private messaging (opt-in, coexists with E2E) ──
+  // Private (MagicBlock TEE) is now the ONLY messaging model — always on, no toggle.
+  const [privateMode] = useState(true);
+  const [deleting, setDeleting] = useState(false);
+  const privateReadyChats = useRef(new Set<number>()); // chats already delegated+permissioned this session
+  // Raw wallet message-signer for the TEE auth token.
+  const teeSign = useCallback(
+    async (m: Uint8Array) => new Uint8Array((await wallet.wallet!.signMessage({ message: m })).signature),
+    [wallet]
+  );
+  // Ensure a chat is delegated to the TEE + permissioned to both members (idempotent).
+  const ensureChatPrivate = useCallback(async (chatId: number, peer: PublicKey) => {
+    if (!program || !publicKey) return;
+    if (privateReadyChats.current.has(chatId)) return;
+    try { await program.enablePrivateInbox(chatId); } catch (e: any) {
+      if (!/already|delegated|in use|in progress/i.test(e?.message || "")) throw e; // ignore "already set up"
+    }
+    const { initInboxPermission } = await import("@/lib/privateChat");
+    await initInboxPermission(chatId, [publicKey, peer], wallet as any, teeSign);
+    privateReadyChats.current.add(chatId);
+  }, [program, publicKey, wallet, teeSign]);
+
+  // Delete the private chat: undelegate from the TEE → close → rent back to treasury.
+  const handleDeleteChat = useCallback(async () => {
+    if (!program || !publicKey || !activeChat) return;
+    if (!confirm("Delete this private chat? Messages will be removed and the rent refunded. This can't be undone.")) return;
+    setDeleting(true);
+    try {
+      const chatId = deriveChatId(publicKey, activeChat.friend.pubkey);
+      toast("privacy", "Deleting chat", "Undelegating from the MagicBlock TEE…");
+      await program.deletePrivateChat(chatId, teeSign, (s) => toast("privacy", "Deleting chat", s));
+      privateReadyChats.current.delete(chatId);
+      setMessages([]);
+      setActiveChat(null);
+      toast("success", "Chat deleted 🗑️", "Removed and rent refunded to the treasury");
+      loadFriendsAndChats();
+    } catch (err: any) {
+      console.error("Delete chat error:", err);
+      toast("error", "Delete failed", err?.message?.slice(0, 120) || "Try again in a moment");
+    }
+    setDeleting(false);
+  }, [program, publicKey, activeChat, teeSign]);
+
   // Payment state
   const [showPayment, setShowPayment] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState("");
@@ -104,6 +158,44 @@ export default function Chat() {
 
   // MagicBlock private USDC payment hook
   const { sendPrivatePayment, step: mbStep, error: mbError, txSignature: mbTxSig, reset: resetMb } = useMagicBlockPayment();
+
+  // Call state
+  const [callMode, setCallMode] = useState<"voice" | "video" | null>(null);
+  const [incomingCall, setIncomingCall] = useState<{ mode: "voice" | "video"; from: string } | null>(null);
+  const seenCallMessages = useRef(new Set<string>());
+  const lastCallSentRef = useRef<number>(0); // timestamp of last call signal sent
+
+  // Send a CALL signal message in chat, then open the modal
+  const handleStartCall = async (mode: "voice" | "video") => {
+    if (!activeChat || !program || !publicKey) return;
+
+    // Debounce: prevent sending duplicate call signals within 10 seconds
+    const now = Date.now();
+    if (now - lastCallSentRef.current < 10000) {
+      setCallMode(mode);
+      return;
+    }
+    lastCallSentRef.current = now;
+
+    const myAddr = publicKey.toBase58();
+    const roomName = getCallRoomName(myAddr, activeChat.friend.address);
+    const callContent = `CALL:${mode}:${roomName}`;
+
+    // Send signal on-chain as a plain message
+    try {
+      let chatInfo = activeChat;
+      if (!chatInfo.exists) {
+        toast("error", "Start a chat first", "Send a message before calling");
+        return;
+      }
+      const msgIndex = await program.getNextMessageIndex(chatInfo.chatId);
+      await program.sendMessageSimple(chatInfo.chatId, msgIndex, `PLAIN:${callContent}`);
+    } catch (err) {
+      console.error("Call signal send failed:", err);
+    }
+
+    setCallMode(mode);
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -122,7 +214,9 @@ export default function Chat() {
         };
         const keys = await deriveEncryptionKeypair(publicKey.toBase58(), signMessage);
         setEncryptionKeys(keys);
-        console.log("🔑 E2E encryption keys derived");
+        // Log derived pubkey so we can verify it matches what's published on-chain
+        const pubKeyB64 = btoa(String.fromCharCode(...keys.publicKey));
+        console.log("🔑 E2E encryption keys derived, myPubKey(b64)=", pubKeyB64);
       } catch (err: any) {
         console.error("Failed to derive encryption keys:", err);
         toast("error", "Encryption key error", "Could not derive encryption keys. Try reconnecting.");
@@ -198,7 +292,7 @@ export default function Chat() {
           friend,
           exists,
           messageCount: msgCount,
-          lastMessage: exists ? (lastMsg || "Start chatting...") : "Tap to start encrypted chat",
+          lastMessage: exists ? (lastMsg || "Start chatting...") : "Tap to start private chat",
           lastMessageTime: lastTime,
         });
       }
@@ -226,6 +320,13 @@ export default function Chat() {
     try {
       const myAddr = publicKey.toBase58();
 
+      // In private (MagicBlock TEE) mode, the E2E key-exchange is irrelevant — the
+      // TEE enforces privacy. Skip all the on-chain key lookups + public reads
+      // (they were flooding /api/rpc with 429s); messages come from the inbox read.
+      if (privateMode) {
+        setPeerPubKey(null);
+      } else {
+
       // Check if we've already published our key (read-only — actual publishing happens in handleSend)
       if (chatInfo.exists && !keyPublishedChats.current.has(chatInfo.chatId)) {
         try {
@@ -251,6 +352,19 @@ export default function Chat() {
           peerKey
         );
         setMessages(decrypted);
+        // Detect incoming call signals from peer
+        for (const msg of decrypted) {
+          if (msg.isMe) continue;
+          const text = msg.decrypted || msg.content || "";
+          if (text.startsWith("CALL:") && !seenCallMessages.current.has(msg.publicKey + msg.messageIndex)) {
+            seenCallMessages.current.add(msg.publicKey + msg.messageIndex);
+            const parts = text.split(":");
+            if (parts.length >= 2) {
+              const cMode = parts[1] as "voice" | "video";
+              if (!callMode) setIncomingCall({ mode: cMode, from: msg.sender });
+            }
+          }
+        }
       } else {
         const raw = await program.getMessagesForChat(chatInfo.chatId);
         setMessages(raw.map((m: any) => ({
@@ -267,30 +381,66 @@ export default function Chat() {
           isMe: m.sender === myAddr,
         })));
       }
+      } // end !privateMode E2E block
+
+      // ── Merge MagicBlock private (TEE inbox) messages, if this chat uses them ──
+      // Auto-detect an on-chain private inbox so the RECIPIENT sees private
+      // messages without having to flip the toggle themselves.
+      let hasPrivateInbox = privateReadyChats.current.has(chatInfo.chatId) || privateMode;
+      if (!hasPrivateInbox) {
+        try {
+          const { getInboxPda } = await import("@/lib/privateChat");
+          const info = await program.provider.connection.getAccountInfo(getInboxPda(chatInfo.chatId));
+          if (info) { hasPrivateInbox = true; privateReadyChats.current.add(chatInfo.chatId); }
+        } catch { /* ignore */ }
+      }
+      if (hasPrivateInbox) {
+        try {
+          const { readInbox } = await import("@/lib/privateChat");
+          const priv = await readInbox(chatInfo.chatId, publicKey, teeSign);
+          if (priv.length) {
+            const mapped = priv.map((p, i) => ({
+              publicKey: "priv-" + i, messageIndex: 1_000_000 + i, sender: p.sender,
+              content: p.content, decrypted: p.content.startsWith("PLAIN:") ? p.content.slice(6) : p.content,
+              isPayment: false, paymentAmount: 0, timestamp: p.timestamp,
+              isKeyExchange: false, isEncrypted: true, isMe: p.sender === myAddr,
+            }));
+            setMessages((prev) => {
+              const base = prev.filter((m) => !String(m.publicKey).startsWith("priv-") && m.publicKey !== "pending");
+              return [...base, ...mapped].sort((a, b) => Number(a.timestamp) - Number(b.timestamp) || a.messageIndex - b.messageIndex);
+            });
+          }
+        } catch { /* not private / no access — ignore */ }
+      }
     } catch (err) {
       console.error("Failed to load messages:", err);
       setMessages([]);
     }
     setLoadingMessages(false);
-  }, [program, publicKey, encryptionKeys]);
+  }, [program, publicKey, encryptionKeys, privateMode, teeSign]);
 
-  // Poll for new messages
+  // Keep a stable ref to the latest loadMessages so the poll interval below is
+  // created ONCE per chat — NOT recreated on every render. (loadMessages changes
+  // identity each render via teeSign/wallet; having it in the effect deps made the
+  // effect re-fire every render → an immediate loadMessages() call every render →
+  // request storm → 429s on /api/rpc and the TEE, which surface as CORS errors.)
+  const loadMessagesRef = useRef(loadMessages);
+  loadMessagesRef.current = loadMessages;
+
+  // Poll for new messages — interval set once per chat, driven by the ref.
   useEffect(() => {
     if (!activeChat) return;
-    // For non-existent chats, nothing to poll
     if (!activeChat.exists) return;
+    const chat = activeChat;
 
-    // Load immediately
-    loadMessages(activeChat);
+    loadMessagesRef.current(chat); // load immediately
 
-    // Poll, but skip if previous call is still running
     const loadingRef = { current: false };
-    pollRef.current = setInterval(async () => {
+    pollRef.current = setInterval(async () => { // 30s interval
       if (loadingRef.current) return;
       loadingRef.current = true;
-      await loadMessages(activeChat);
-      loadingRef.current = false;
-    }, 15000);
+      try { await loadMessagesRef.current(chat); } finally { loadingRef.current = false; }
+    }, 30000);
 
     return () => {
       if (pollRef.current) {
@@ -298,7 +448,7 @@ export default function Chat() {
         pollRef.current = null;
       }
     };
-  }, [activeChat?.chatId, activeChat?.exists, loadMessages]);
+  }, [activeChat?.chatId, activeChat?.exists]);
 
   const selectChat = async (chat: ChatInfo) => {
     setActiveChat(chat);
@@ -312,6 +462,35 @@ export default function Chat() {
     const content = messageText.trim();
     setMessageText("");
     setSending(true);
+
+    // ── MagicBlock PRIVATE path (opt-in). Runs entirely over the TEE rollup. ──
+    if (privateMode && activeChat) {
+      try {
+        const peer = activeChat.friend.pubkey;
+        const chatId = deriveChatId(publicKey, peer);
+        const { appendPrivateMessage } = await import("@/lib/privateChat");
+
+        if (!privateReadyChats.current.has(chatId)) {
+          toast("privacy", "Securing chat", "Setting up MagicBlock TEE inbox…");
+        }
+        await ensureChatPrivate(chatId, peer);
+
+        const localMsg: DecryptedMsg = {
+          publicKey: "pending", messageIndex: Date.now(), sender: publicKey.toBase58(),
+          content: "PLAIN:" + content, decrypted: content, isPayment: false, paymentAmount: 0,
+          timestamp: Math.floor(Date.now() / 1000).toString(), isKeyExchange: false, isEncrypted: true, isMe: true,
+        };
+        setMessages((prev) => [...prev, localMsg]);
+        await appendPrivateMessage(chatId, "PLAIN:" + content, wallet as any, teeSign);
+        toast("success", "Sent privately 🔒", "Delivered inside the MagicBlock TEE");
+      } catch (err: any) {
+        console.error("Private send error:", err);
+        toast("error", "Private send failed", err?.error?.errorMessage || err?.message?.slice(0, 100) || "Try again");
+        setMessages((prev) => prev.filter((m) => m.publicKey !== "pending"));
+      }
+      setSending(false);
+      return;
+    }
 
     try {
       let chatInfo = activeChat;
@@ -341,12 +520,14 @@ export default function Chat() {
       }
 
       // ===== STEP 1: Ensure our encryption key is published FIRST =====
-      // This is the ONLY place key publishing happens (not in loadMessages) to prevent index races
+      // Always verify on-chain when there's no confirmed peer key yet (don't trust in-memory cache alone)
       const myAddr = publicKey.toBase58();
       console.log(`📤 handleSend: chatId=${chatInfo.chatId}, exists=${chatInfo.exists}, myAddr=${myAddr.slice(0,8)}...`);
-      console.log(`📤 handleSend: keyPublishedChats has chatId? ${keyPublishedChats.current.has(chatInfo.chatId)}`);
-      
-      if (chatInfo.exists && !keyPublishedChats.current.has(chatInfo.chatId)) {
+
+      const skipKeyCheck = keyPublishedChats.current.has(chatInfo.chatId) && peerPubKey !== null;
+      console.log(`📤 handleSend: skipKeyCheck=${skipKeyCheck} (cached=${keyPublishedChats.current.has(chatInfo.chatId)}, hasPeerKey=${peerPubKey !== null})`);
+
+      if (chatInfo.exists && !skipKeyCheck) {
         try {
           const hasMyKey = await program.findMyEncryptionKey(chatInfo.chatId, myAddr);
           console.log(`📤 handleSend: findMyEncryptionKey result: ${hasMyKey}`);
@@ -363,7 +544,6 @@ export default function Chat() {
           }
         } catch (keyErr) {
           console.error("❌ handleSend: Key publish failed:", keyErr);
-          // Continue anyway — message can still be sent as plaintext
         }
       }
 
@@ -603,7 +783,7 @@ export default function Chat() {
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-1.5">
               <h2 className="font-bold text-sm text-[#1A1A2E]">Messages</h2>
-              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-[#7C3AED]/10 text-[#7C3AED] font-medium">🔐 E2E</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-[#16A34A]/10 text-[#16A34A] font-medium">🔒 Private</span>
             </div>
             <button
               onClick={loadFriendsAndChats}
@@ -651,7 +831,7 @@ export default function Chat() {
             >
               <div className="relative">
                 {chat.friend.avatar && chat.friend.avatar.startsWith("http") ? (
-                  <img src={chat.friend.avatar} alt={chat.friend.displayName} className="w-12 h-12 rounded-full object-cover" />
+                  <img src={chat.friend.avatar} onError={handleIpfsImgError} alt={chat.friend.displayName} className="w-12 h-12 rounded-full object-cover" />
                 ) : (
                   <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#EBF4FF] to-[#E0F2FE] flex items-center justify-center text-xl">
                     {chat.friend.avatar}
@@ -699,7 +879,7 @@ export default function Chat() {
                 <ArrowLeft className="w-5 h-5 text-[#64748B]" />
               </button>
               {activeChat.friend.avatar && activeChat.friend.avatar.startsWith("http") ? (
-                <img src={activeChat.friend.avatar} alt={activeChat.friend.displayName} className="w-9 h-9 sm:w-10 sm:h-10 rounded-full object-cover flex-shrink-0" />
+                <img src={activeChat.friend.avatar} onError={handleIpfsImgError} alt={activeChat.friend.displayName} className="w-9 h-9 sm:w-10 sm:h-10 rounded-full object-cover flex-shrink-0" />
               ) : (
                 <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-gradient-to-br from-[#EBF4FF] to-[#E0F2FE] flex items-center justify-center text-base sm:text-lg flex-shrink-0">
                   {activeChat.friend.avatar}
@@ -710,7 +890,12 @@ export default function Chat() {
                   {activeChat.friend.displayName}
                 </span>
                 <div className="flex items-center gap-1">
-                  {activeChat.exists && peerPubKey ? (
+                  {privateMode ? (
+                    <>
+                      <ShieldCheck className="w-2.5 h-2.5 text-[#16A34A]" />
+                      <span className="text-[10px] text-[#16A34A] font-medium">Private • MagicBlock TEE</span>
+                    </>
+                  ) : activeChat.exists && peerPubKey ? (
                     <>
                       <ShieldCheck className="w-2.5 h-2.5 text-[#16A34A]" />
                       <span className="text-[10px] text-[#16A34A] font-medium">E2E Encrypted • On-Chain • NaCl Box</span>
@@ -728,14 +913,82 @@ export default function Chat() {
                   )}
                 </div>
               </div>
-              {activeChat.exists && (
+              <div className="flex items-center gap-1">
                 <button
-                  onClick={() => loadMessages(activeChat)}
-                  disabled={loadingMessages}
-                  className="w-8 h-8 rounded-lg hover:bg-[#F1F5F9] flex items-center justify-center"
+                  onClick={() => handleStartCall("voice")}
+                  title="Voice call"
+                  className="w-8 h-8 rounded-lg hover:bg-[#F1F5F9] flex items-center justify-center transition-colors"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 text-[#94A3B8] ${loadingMessages ? "animate-spin" : ""}`} />
+                  <Phone className="w-4 h-4 text-[#16A34A]" />
                 </button>
+                <button
+                  onClick={() => handleStartCall("video")}
+                  title="Video call"
+                  className="w-8 h-8 rounded-lg hover:bg-[#F1F5F9] flex items-center justify-center transition-colors"
+                >
+                  <Video className="w-4 h-4 text-[#2563EB]" />
+                </button>
+                {activeChat.exists && (
+                  <button
+                    onClick={() => {
+                      // Clear peer key cache so refresh forces a full re-scan
+                      if (program && publicKey) {
+                        program.clearPeerKeyCache(activeChat.chatId, publicKey.toBase58());
+                      }
+                      loadMessages(activeChat);
+                    }}
+                    disabled={loadingMessages}
+                    className="w-8 h-8 rounded-lg hover:bg-[#F1F5F9] flex items-center justify-center"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 text-[#94A3B8] ${loadingMessages ? "animate-spin" : ""}`} />
+                  </button>
+                )}
+                <button
+                  onClick={handleDeleteChat}
+                  disabled={deleting}
+                  title="Delete chat & refund rent"
+                  className="w-8 h-8 rounded-lg hover:bg-[#FEE2E2] flex items-center justify-center transition-colors disabled:opacity-50"
+                >
+                  <Trash2 className={`w-3.5 h-3.5 text-[#EF4444] ${deleting ? "animate-pulse" : ""}`} />
+                </button>
+              </div>
+
+              {/* Incoming call banner */}
+              {incomingCall && !callMode && (
+                <div className="absolute top-14 left-0 right-0 z-40 mx-4 bg-[#1A1A2E] text-white rounded-2xl px-4 py-3 flex items-center gap-3 shadow-2xl border border-[#16A34A]/30">
+                  <div className="w-9 h-9 rounded-full bg-[#16A34A] flex items-center justify-center animate-pulse flex-shrink-0">
+                    <PhoneIncoming className="w-4 h-4 text-white" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold truncate">{activeChat.friend.displayName}</p>
+                    <p className="text-xs text-white/60">Incoming {incomingCall.mode} call...</p>
+                  </div>
+                  <button
+                    onClick={() => setIncomingCall(null)}
+                    className="w-9 h-9 rounded-full bg-[#EF4444] flex items-center justify-center flex-shrink-0"
+                  >
+                    <PhoneOff className="w-4 h-4 text-white" />
+                  </button>
+                  <button
+                    onClick={() => { setCallMode(incomingCall.mode); setIncomingCall(null); }}
+                    className="w-9 h-9 rounded-full bg-[#16A34A] flex items-center justify-center flex-shrink-0"
+                  >
+                    <Phone className="w-4 h-4 text-white" />
+                  </button>
+                </div>
+              )}
+
+              {/* Call Modal */}
+              {callMode && publicKey && (
+                <CallModal
+                  myAddress={publicKey.toBase58()}
+                  peerAddress={activeChat.friend.address}
+                  peerName={activeChat.friend.displayName}
+                  peerAvatar={activeChat.friend.avatar}
+                  mode={callMode}
+                  isIncoming={!!incomingCall}
+                  onClose={() => { setCallMode(null); setIncomingCall(null); }}
+                />
               )}
 
             </div>
@@ -744,7 +997,11 @@ export default function Chat() {
             <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-[#FAFBFC]">
               <div className="flex justify-center mb-4">
                 <span className="text-[10px] text-[#94A3B8] bg-white px-3 py-1 rounded-full border border-[#E2E8F0] flex items-center gap-1">
-                  {activeChat.exists && peerPubKey ? (
+                  {privateMode ? (
+                    <>
+                      <ShieldCheck className="w-2.5 h-2.5 text-[#16A34A]" /> Private — messages run inside the MagicBlock TEE
+                    </>
+                  ) : activeChat.exists && peerPubKey ? (
                     <>
                       <ShieldCheck className="w-2.5 h-2.5 text-[#16A34A]" /> End-to-end encrypted — NaCl Box on Solana
                     </>
@@ -784,15 +1041,16 @@ export default function Chat() {
 
               {!activeChat.exists && messages.length === 0 && !creatingChat && (
                 <div className="text-center py-8">
-                  <ShieldCheck className="w-10 h-10 text-[#7C3AED] mx-auto mb-3" />
-                  <p className="text-sm text-[#64748B] mb-1">End-to-end encrypted messaging</p>
-                  <p className="text-xs text-[#94A3B8]">Messages are encrypted with NaCl Box (X25519-XSalsa20-Poly1305)</p>
-                  <p className="text-xs text-[#94A3B8] mt-1">Only you and the recipient can read them 🔐</p>
+                  <ShieldCheck className="w-10 h-10 text-[#16A34A] mx-auto mb-3" />
+                  <p className="text-sm text-[#64748B] mb-1">Private messaging</p>
+                  <p className="text-xs text-[#94A3B8]">Messages run inside the MagicBlock TEE (Private Ephemeral Rollup)</p>
+                  <p className="text-xs text-[#94A3B8] mt-1">Only you and the recipient can read them 🔒</p>
                 </div>
               )}
 
               {messages.filter(m => !m.isKeyExchange).map((msg, i) => {
                 const isPaymentMsg = msg.isPayment || msg.decrypted?.startsWith("PAY:") || msg.content?.startsWith("PAY:");
+                const isCallMsg = (msg.decrypted || "").startsWith("CALL:") || (msg.content || "").startsWith("PLAIN:CALL:");
                 let displayText = msg.isEncrypted
                   ? (msg.decrypted || "🔒 Unable to decrypt")
                   : msg.content;
@@ -814,9 +1072,47 @@ export default function Chat() {
                   }
                 }
 
+                // Parse call mode for display
+                const callMsgMode = isCallMsg
+                  ? ((msg.decrypted || msg.content || "").split(":")[1] || "voice") as "voice" | "video"
+                  : "voice";
+
                 return (
                   <div key={`${msg.timestamp}-${i}`} className={`flex ${msg.isMe ? "justify-end" : "justify-start"}`}>
-                    {isPaymentMsg ? (
+                    {isCallMsg ? (
+                      <div className={`max-w-[85%] sm:max-w-[260px] rounded-2xl overflow-hidden border ${
+                        msg.isMe ? "border-[#2563EB]/30 bg-[#EFF6FF]" : "border-[#16A34A]/30 bg-[#F0FDF4]"
+                      }`}>
+                        <div className={`px-4 py-3 flex items-center gap-3`}>
+                          <div className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 ${
+                            msg.isMe ? "bg-[#2563EB]" : "bg-[#16A34A]"
+                          }`}>
+                            {callMsgMode === "video"
+                              ? <Video className="w-4 h-4 text-white" />
+                              : <Phone className="w-4 h-4 text-white" />}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-semibold text-[#1A1A2E]">
+                              {callMsgMode === "video" ? "Video Call" : "Voice Call"}
+                            </p>
+                            <p className="text-xs text-[#64748B]">
+                              {msg.isMe ? "You called" : `${activeChat.friend.displayName} called`}
+                            </p>
+                          </div>
+                          {!msg.isMe && (
+                            <button
+                              onClick={() => { setCallMode(callMsgMode); setIncomingCall(null); }}
+                              className="text-xs font-semibold text-white bg-[#16A34A] px-3 py-1.5 rounded-lg hover:bg-[#15803D] transition-colors flex-shrink-0"
+                            >
+                              Join
+                            </button>
+                          )}
+                        </div>
+                        <div className={`px-4 py-1 text-[10px] ${msg.isMe ? "text-[#93C5FD]" : "text-[#86EFAC]"}`}>
+                          {Number(msg.timestamp) > 0 ? timeAgo(Number(msg.timestamp) * 1000) : "now"}
+                        </div>
+                      </div>
+                    ) : isPaymentMsg ? (
                       <div
                         className={`max-w-[85%] sm:max-w-[320px] rounded-2xl text-sm overflow-hidden ${
                           msg.isMe
@@ -977,18 +1273,19 @@ export default function Chat() {
                 >
                   <DollarSign className="w-4 h-4" />
                 </button>
+                {/* Always-on private indicator (MagicBlock TEE is the only model). */}
+                <div
+                  className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 bg-[#16A34A] text-white"
+                  title="Private — all messages run inside the MagicBlock TEE"
+                >
+                  <Lock className="w-4 h-4" />
+                </div>
                 <input
                   type="text"
                   value={messageText}
                   onChange={(e) => setMessageText(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-                  placeholder={
-                    creatingChat
-                      ? "Setting up encryption..."
-                      : activeChat.exists && !peerPubKey
-                      ? "Waiting for key exchange..."
-                      : "Type a message — E2E encrypted 🔐"
-                  }
+                  placeholder="Private message via MagicBlock TEE 🔒"
                   disabled={sending || creatingChat}
                   className="flex-1 bg-[#F8FAFC] border border-[#E2E8F0] rounded-xl px-3.5 sm:px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#2563EB]/20 focus:border-[#2563EB] disabled:opacity-50"
                 />
@@ -1018,11 +1315,11 @@ export default function Chat() {
               </h3>
               <p className="text-sm text-[#64748B]">
                 {chats.length > 0
-                  ? "End-to-end encrypted messaging on Solana 🔐"
-                  : "Follow people to start encrypted chats"}
+                  ? "Private messaging on Solana 🔒"
+                  : "Follow people to start private chats"}
               </p>
               <p className="text-[10px] text-[#94A3B8] mt-2">
-                NaCl Box (X25519-XSalsa20-Poly1305) • Same crypto as Signal
+                Private via MagicBlock TEE (Private Ephemeral Rollup)
               </p>
             </div>
           </div>

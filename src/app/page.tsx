@@ -8,12 +8,17 @@ import Header from "@/components/Header";
 import Feed from "@/components/Feed";
 import Chat from "@/components/Chat";
 import Payments from "@/components/Payments";
+import Marketplace from "@/components/Marketplace";
 import Profile from "@/components/Profile";
 import CreatorDashboard from "@/components/CreatorDashboard";
 import Friends from "@/components/Friends";
 import Tokens from "@/components/Tokens";
+import Stocks from "@/components/Stocks";
 import Communities from "@/components/Communities";
+import Quests from "@/components/Quests";
 import TrendingSidebar from "@/components/TrendingSidebar";
+import AI from "@/components/AI";
+import FloatingAIButton from "@/components/FloatingAIButton";
 import ToastContainer from "@/components/Toast";
 import Landing from "@/components/Landing";
 import OnboardingDemo from "@/components/OnboardingDemo";
@@ -118,13 +123,18 @@ export default function Home() {
           {activeTab === "chat" && <Chat />}
           {activeTab === "friends" && <Friends />}
           {activeTab === "tokens" && <Tokens />}
+          {activeTab === "stocks" && <Stocks />}
           {activeTab === "communities" && <Communities />}
+          {activeTab === "quests" && <Quests />}
           {activeTab === "payments" && <Payments />}
+          {activeTab === "market" && <Marketplace />}
           {activeTab === "dashboard" && <CreatorDashboard />}
+          {activeTab === "ai" && <AI />}
           {activeTab === "profile" && <Profile />}
         </main>
       </div>
       <MobileNav />
+      <FloatingAIButton />
     </>
   );
 }

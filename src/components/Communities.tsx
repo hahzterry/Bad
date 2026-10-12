@@ -6,7 +6,7 @@ import { useAppStore } from "@/lib/store";
 import { toast } from "@/components/Toast";
 import { useProgram } from "@/hooks/useProgram";
 import { useWallet } from "@/hooks/usePrivyWallet";
-import { uploadImage } from "@/components/RichContent";
+import { uploadImage, handleIpfsImgError } from "@/components/RichContent";
 import { clearRpcCache } from "@/lib/program";
 import { OnChainPostCard, parseCommunityPost } from "@/components/Feed";
 import type { ShyftClient } from "@/lib/program";
@@ -257,7 +257,7 @@ export default function Communities() {
           <div className="flex items-start gap-4">
             <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[#2563EB] to-[#7C3AED] flex items-center justify-center text-white text-2xl font-bold overflow-hidden shrink-0">
               {selectedCommunity.avatarUrl ? (
-                <img src={selectedCommunity.avatarUrl} alt="" className="w-full h-full object-cover" />
+                <img src={selectedCommunity.avatarUrl} onError={handleIpfsImgError} alt="" className="w-full h-full object-cover" />
               ) : (
                 selectedCommunity.name.charAt(0).toUpperCase()
               )}
@@ -340,7 +340,7 @@ export default function Communities() {
                   <div key={m.member} className="flex items-center gap-3 p-2 rounded-xl hover:bg-[#F8FAFC] transition-colors">
                     <div className="w-9 h-9 rounded-full bg-gradient-to-br from-[#2563EB] to-[#16A34A] flex items-center justify-center text-white text-xs font-bold overflow-hidden">
                       {profile?.avatarUrl ? (
-                        <img src={profile.avatarUrl} alt="" className="w-full h-full object-cover" />
+                        <img src={profile.avatarUrl} onError={handleIpfsImgError} alt="" className="w-full h-full object-cover" />
                       ) : (
                         (profile?.username || m.member.slice(0, 2)).charAt(0).toUpperCase()
                       )}
@@ -976,7 +976,7 @@ function CommunityCard({
       <div className="flex items-center gap-3">
         <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#2563EB] to-[#7C3AED] flex items-center justify-center text-white text-lg font-bold overflow-hidden shrink-0">
           {community.avatarUrl ? (
-            <img src={community.avatarUrl} alt="" className="w-full h-full object-cover" />
+            <img src={community.avatarUrl} onError={handleIpfsImgError} alt="" className="w-full h-full object-cover" />
           ) : (
             community.name.charAt(0).toUpperCase()
           )}

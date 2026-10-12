@@ -53,10 +53,13 @@ interface AppState {
   addOnChainComment: (postKey: string, author: string, displayName: string, content: string) => void;
   likedPosts: string[]; // array of post publicKeys the user has liked
   addLikedPost: (postKey: string) => void;
+  setLikedPosts: (postKeys: string[]) => void;
 
   // Paid post unlocks
   unlockedPosts: string[]; // post publicKeys the user has paid to unlock
   addUnlockedPost: (postKey: string) => void;
+  postReceipts: Record<string, string>; // postKey -> x402 receiptId
+  addPostReceipt: (postKey: string, receiptId: string) => void;
 
   // Post tips
   postTips: Record<string, { totalAmount: number; tipCount: number; myTip: number }>;
@@ -232,11 +235,18 @@ export const useAppStore = create<AppState>()(
   addLikedPost: (postKey) => set((state) => ({
     likedPosts: state.likedPosts.includes(postKey) ? state.likedPosts : [...state.likedPosts, postKey],
   })),
+  setLikedPosts: (postKeys) => set((state) => ({
+    likedPosts: [...new Set([...state.likedPosts, ...postKeys])],
+  })),
 
   // Paid post unlocks
   unlockedPosts: [],
   addUnlockedPost: (postKey) => set((state) => ({
     unlockedPosts: state.unlockedPosts.includes(postKey) ? state.unlockedPosts : [...state.unlockedPosts, postKey],
+  })),
+  postReceipts: {},
+  addPostReceipt: (postKey, receiptId) => set((state) => ({
+    postReceipts: { ...state.postReceipts, [postKey]: receiptId },
   })),
 
   // Post tips
@@ -311,6 +321,7 @@ export const useAppStore = create<AppState>()(
         onChainComments: state.onChainComments,
         likedPosts: state.likedPosts,
         unlockedPosts: state.unlockedPosts,
+        postReceipts: state.postReceipts,
         postTips: state.postTips,
         notifications: state.notifications,
         seenNotificationKeys: state.seenNotificationKeys,

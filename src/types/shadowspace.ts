@@ -1566,11 +1566,51 @@ export type Shadowspace = {
           }
         },
         {
+          "name": "likeRecord",
+          "docs": [
+            "One LikeRecord PDA per (post, liker) — init will fail if they've already liked"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  107,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "post"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
           "name": "user",
           "docs": [
-            "The liker — must be the profile owner"
+            "The liker — must be the profile owner (read-only, no SOL needed)"
           ],
           "signer": true
+        },
+        {
+          "name": "payer",
+          "docs": [
+            "Treasury pays for like_record rent"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [

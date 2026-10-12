@@ -5,9 +5,21 @@ import {
   PublicKey,
   Transaction,
   SystemProgram,
+  ComputeBudgetProgram,
 } from "@solana/web3.js";
 import { Program, AnchorProvider, Idl, BN } from "@coral-xyz/anchor";
 import idl from "@/lib/idl.json";
+import {
+  DELEGATION_PROGRAM_ID,
+  MAGIC_PROGRAM_ID,
+  MAGIC_CONTEXT_ID,
+  delegationRecordPdaFromDelegatedAccount,
+  delegationMetadataPdaFromDelegatedAccount,
+  delegateBufferPdaFromDelegatedAccountAndOwnerProgram,
+} from "@magicblock-labs/ephemeral-rollups-sdk";
+
+// MagicBlock TEE validator (mainnet, private ER).
+const TEE_VALIDATOR = new PublicKey("MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo");
 
 /**
  * /api/build-tx — Server builds the ENTIRE transaction from action + params.
@@ -38,6 +50,51 @@ const COMMUNITY_SEED = Buffer.from("community");
 const MEMBERSHIP_SEED = Buffer.from("membership");
 const POLL_SEED = Buffer.from("poll");
 const POLL_VOTE_SEED = Buffer.from("poll_vote");
+const LIKE_SEED = Buffer.from("like");
+const USERNAME_SEED = Buffer.from("username");
+const LISTING_SEED = Buffer.from("listing");
+// Official $SHYFT mint — usernames are priced in this token.
+const SHYFT_MINT = new PublicKey("7tnB2Dn61NkxWrpkESkUvfoKo6TcoecsazYemptEASY");
+const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const ATA_PROGRAM = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+function getUsernamePda(name: string): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([USERNAME_SEED, Buffer.from(name)], PROGRAM_ID);
+}
+function getListingPda(name: string): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([LISTING_SEED, Buffer.from(name)], PROGRAM_ID);
+}
+function getAta(owner: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), TOKEN_PROGRAM.toBuffer(), SHYFT_MINT.toBuffer()],
+    ATA_PROGRAM,
+  )[0];
+}
+/** Never trust the client's price. Must be a positive integer of $SHYFT base
+ * units (6 dp), within u64, no decimals/negatives/junk. */
+function parsePrice(raw: any): BN {
+  const s = String(raw ?? "").trim();
+  if (!/^[0-9]+$/.test(s)) throw new Error("Invalid price");
+  const bn = new BN(s);
+  if (bn.lten(0)) throw new Error("Price must be greater than 0");
+  if (bn.bitLength() > 64) throw new Error("Price too large");
+  return bn;
+}
+/** `createIdempotent` for a $SHYFT ATA. `payer` funds the rent (must be the
+ * buyer for marketplace buys, never the treasury — see the rent-drain rule). */
+function createAtaIdempotentIx(payer: PublicKey, ata: PublicKey, owner: PublicKey) {
+  return {
+    programId: ATA_PROGRAM,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: ata, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: false, isWritable: false },
+      { pubkey: SHYFT_MINT, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from([1]), // 1 = CreateIdempotent
+  };
+}
 
 function toLEBytes(num: number): Uint8Array {
   const buffer = new ArrayBuffer(8);
@@ -53,8 +110,14 @@ function getProfilePda(owner: PublicKey): [PublicKey, number] {
 function getPostPda(author: PublicKey, postId: number): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([POST_SEED, author.toBuffer(), toLEBytes(postId)], PROGRAM_ID);
 }
+function getLikeRecordPda(postPda: PublicKey, liker: PublicKey): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([LIKE_SEED, postPda.toBuffer(), liker.toBuffer()], PROGRAM_ID);
+}
 function getChatPda(chatId: number): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([CHAT_SEED, toLEBytes(chatId)], PROGRAM_ID);
+}
+function getInboxPda(chatId: number): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([Buffer.from("inbox"), toLEBytes(chatId)], PROGRAM_ID);
 }
 function getMessagePda(chatId: number, messageIndex: number): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([MESSAGE_SEED, toLEBytes(chatId), toLEBytes(messageIndex)], PROGRAM_ID);
@@ -106,10 +169,34 @@ function getTreasuryKeypair(): Keypair {
 }
 
 // ========== Rate Limiting ==========
+//
+// Two things are being protected, and they need different limits:
+//
+//  1. Ordinary social actions (post/like/comment/follow). These are cheap and
+//     users legitimately do a dozen in a sitting, so the cap is per WALLET and
+//     generous. The old flat 5/min blocked real users mid-task — an activation
+//     campaign asks for 12 actions a day.
+//  2. Sponsored ACCOUNT CREATION, which spends treasury SOL on rent and is the
+//     actual drain vector. That stays tight, and is capped per IP because a
+//     wallet only ever creates one profile — per-wallet limits can't see the
+//     attack.
+//
+// IP limits are deliberately loose: carrier-grade NAT puts large numbers of
+// unrelated mobile users behind one address, so a tight per-IP cap throttles
+// households, cafes and whole mobile networks rather than attackers.
 const ipTimestamps = new Map<string, number[]>();
 const walletTimestamps = new Map<string, number[]>();
+const signupIpTimestamps = new Map<string, number[]>();
+
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = 5;
+const WALLET_MAX_PER_MIN = 20;
+const IP_MAX_PER_MIN = 60;
+
+/** Account-creating actions: treasury pays rent, so these get their own cap. */
+const SIGNUP_ACTIONS = new Set(["createProfile", "claimUsername"]);
+const SIGNUP_WINDOW_MS = 3_600_000; // 1 hour
+const SIGNUP_MAX_PER_IP = 20; // ~10 signups/hour/IP (a signup is 2 calls)
+
 const MIN_TREASURY_RESERVE = 100_000_000; // 0.1 SOL
 
 function getClientIp(request: NextRequest): string {
@@ -120,14 +207,40 @@ function getClientIp(request: NextRequest): string {
   );
 }
 
-function isRateLimited(key: string, store: Map<string, number[]>): boolean {
+/**
+ * Sliding-window counter. Records the hit when it allows one, so callers
+ * should check the cheapest/tightest limit first.
+ */
+function isRateLimited(
+  key: string,
+  store: Map<string, number[]>,
+  max: number,
+  windowMs: number,
+): boolean {
   const now = Date.now();
-  const timestamps = (store.get(key) || []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
-  store.set(key, timestamps);
-  if (timestamps.length >= RATE_LIMIT_MAX) return true;
+  const timestamps = (store.get(key) || []).filter((t) => now - t < windowMs);
+  if (timestamps.length >= max) {
+    store.set(key, timestamps);
+    return true;
+  }
   timestamps.push(now);
   store.set(key, timestamps);
   return false;
+}
+
+// Keys accumulate forever otherwise — one entry per wallet/IP ever seen.
+let sweepCounter = 0;
+function sweepRateLimitStores() {
+  if (++sweepCounter % 500 !== 0) return;
+  const now = Date.now();
+  const prune = (store: Map<string, number[]>, windowMs: number) => {
+    for (const [key, ts] of store) {
+      if (!ts.some((t) => now - t < windowMs)) store.delete(key);
+    }
+  };
+  prune(ipTimestamps, RATE_LIMIT_WINDOW_MS);
+  prune(walletTimestamps, RATE_LIMIT_WINDOW_MS);
+  prune(signupIpTimestamps, SIGNUP_WINDOW_MS);
 }
 
 const ALLOWED_ORIGINS = new Set([
@@ -182,13 +295,116 @@ const actions: Record<string, ActionHandler> = {
 
   // ── PROFILE ──
   async createProfile(params, user, treasury, program) {
-    const { username, displayName, bio } = params;
-    if (!username || typeof username !== "string") throw new Error("Missing username");
+    // Username is now claimed separately (registry-enforced uniqueness). The
+    // program rejects a non-empty username here, so profiles start nameless and
+    // the client follows with `claimUsername`.
+    const { displayName, bio } = params;
     const [profilePda] = getProfilePda(user);
     return program.methods
-      .createProfile(username, displayName || "", bio || "")
+      .createProfile("", displayName || "", bio || "")
       .accounts({ profile: profilePda, user, payer: treasury, systemProgram: SystemProgram.programId })
       .instruction();
+  },
+
+  // ── USERNAMES / MARKETPLACE ──
+  async claimUsername(params, user, treasury, program) {
+    const name = String(params.name || "").toLowerCase();
+    if (!name) throw new Error("Missing name");
+    const [profilePda] = getProfilePda(user);
+    const [recordPda] = getUsernamePda(name);
+    return program.methods
+      .claimUsername(name)
+      .accounts({ usernameRecord: recordPda, profile: profilePda, user, payer: treasury, systemProgram: SystemProgram.programId })
+      .instruction();
+  },
+
+  async setDisplayUsername(params, user, treasury, program) {
+    const name = String(params.name || "").toLowerCase();
+    const [profilePda] = getProfilePda(user);
+    const [recordPda] = getUsernamePda(name);
+    return program.methods
+      .setDisplayUsername(name)
+      .accounts({ usernameRecord: recordPda, profile: profilePda, user })
+      .instruction();
+  },
+
+  async listUsername(params, user, treasury, program) {
+    const name = String(params.name || "").toLowerCase();
+    if (!name) throw new Error("Missing name");
+    const price = parsePrice(params.price); // validated $SHYFT base units
+    const [listingPda] = getListingPda(name);
+    const [recordPda] = getUsernamePda(name);
+    const [profilePda] = getProfilePda(user);
+    // Treasury funds the listing rent (gasless — users hold no SOL). This is
+    // SAFE from the old rent-drain because the Listing stores rent_payer =
+    // treasury and buy/delist refund ONLY to rent_payer, so a list→delist loop
+    // just cycles the treasury's own rent back (net zero), never to the user.
+    return program.methods
+      .listUsername(name, price)
+      .accounts({ listing: listingPda, usernameRecord: recordPda, sellerProfile: profilePda, seller: user, payer: treasury, systemProgram: SystemProgram.programId })
+      .instruction();
+  },
+
+  async updatePrice(params, user, treasury, program) {
+    const name = String(params.name || "").toLowerCase();
+    if (!name) throw new Error("Missing name");
+    const price = parsePrice(params.price);
+    const [listingPda] = getListingPda(name);
+    return program.methods
+      .updatePrice(name, price)
+      .accounts({ listing: listingPda, seller: user })
+      .instruction();
+  },
+
+  async delistUsername(params, user, treasury, program) {
+    const name = String(params.name || "").toLowerCase();
+    const [listingPda] = getListingPda(name);
+    const [recordPda] = getUsernamePda(name);
+    const listing: any = await (program.account as any).listing.fetch(listingPda);
+    return program.methods
+      .delistUsername(name)
+      .accounts({ listing: listingPda, rentPayer: listing.rentPayer, usernameRecord: recordPda, seller: user })
+      .instruction();
+  },
+
+  // Buyer (`user`) signs and pays. Returns [ensure-seller-ATA, buy].
+  async buyUsername(params, user, treasury, program) {
+    const name = String(params.name || "").toLowerCase();
+    if (!name) throw new Error("Missing name");
+    const [listingPda] = getListingPda(name);
+    const [recordPda] = getUsernamePda(name);
+    const [buyerProfile] = getProfilePda(user);
+
+    // Read the listing to learn the seller (the buyer signs alone).
+    const listing: any = await (program.account as any).listing.fetch(listingPda);
+    const seller: PublicKey = listing.seller;
+    const rentPayer: PublicKey = listing.rentPayer; // must match on-chain (has_one)
+
+    const buyerAta = getAta(user);
+    const sellerAta = getAta(seller);
+    const treasuryAta = getAta(treasury);
+
+    // Create the seller's $SHYFT account if missing — funded by the BUYER, never
+    // the treasury (a treasury-funded, user-owned ATA is a rent-drain loop).
+    const createSellerAta = createAtaIdempotentIx(user, sellerAta, seller);
+
+    const buyIx = await program.methods
+      .buyUsername(name)
+      .accounts({
+        listing: listingPda,
+        rentPayer, // must equal listing.rent_payer (the seller who funded it)
+        usernameRecord: recordPda,
+        buyerProfile,
+        buyer: user,
+        seller,
+        buyerToken: buyerAta,
+        sellerToken: sellerAta,
+        treasuryToken: treasuryAta, // ignored while fee is 0, but the account is still in the layout
+        tokenProgram: TOKEN_PROGRAM,
+      })
+      .instruction();
+
+    return [createSellerAta, buyIx];
   },
 
   async migrateProfile(params, user, treasury, program) {
@@ -200,10 +416,10 @@ const actions: Record<string, ActionHandler> = {
   },
 
   async updateProfile(params, user, treasury, program) {
-    const { displayName, bio, avatarUrl, bannerUrl } = params;
+    const { displayName, bio, avatarUrl, bannerUrl, websiteUrl } = params;
     const [profilePda] = getProfilePda(user);
     return program.methods
-      .updateProfile(displayName || "", bio || "", avatarUrl || "", bannerUrl || "")
+      .updateProfile(displayName || "", bio || "", avatarUrl || "", bannerUrl || "", websiteUrl || "")
       .accounts({ profile: profilePda, user, payer: treasury, systemProgram: SystemProgram.programId })
       .instruction();
   },
@@ -229,6 +445,17 @@ const actions: Record<string, ActionHandler> = {
       .instruction();
   },
 
+  async editPost(params, user, treasury, program) {
+    const { postId, content } = params;
+    if (postId === undefined) throw new Error("Missing postId");
+    if (!content) throw new Error("Missing content");
+    const [postPda] = getPostPda(user, postId);
+    return program.methods
+      .editPost(new BN(postId), content)
+      .accountsPartial({ post: postPda, author: user })
+      .instruction();
+  },
+
   async closePost(params, user, treasury, program) {
     const { postId } = params;
     if (postId === undefined) throw new Error("Missing postId");
@@ -246,9 +473,10 @@ const actions: Record<string, ActionHandler> = {
     const authorPk = new PublicKey(author);
     const [postPda] = getPostPda(authorPk, postId);
     const [profilePda] = getProfilePda(user);
+    const [likeRecordPda] = getLikeRecordPda(postPda, user);
     return program.methods
       .likePost(new BN(postId))
-      .accountsPartial({ post: postPda, profile: profilePda, user })
+      .accountsPartial({ post: postPda, profile: profilePda, likeRecord: likeRecordPda, user, payer: treasury, systemProgram: SystemProgram.programId })
       .instruction();
   },
 
@@ -268,7 +496,11 @@ const actions: Record<string, ActionHandler> = {
 
   async closeComment(params, user, treasury, program) {
     const { postAuthor, postId, commentIndex } = params;
-    if (!postAuthor || postId === undefined || commentIndex === undefined) throw new Error("Missing params");
+    // NaN from a client serialises to null over JSON, which slips past an
+    // `=== undefined` check and only fails later inside BigInt(). Require a
+    // real finite number so the error names the actual problem.
+    if (!postAuthor || !Number.isFinite(Number(postId)) || !Number.isFinite(Number(commentIndex)))
+      throw new Error("Missing or invalid params");
     const postAuthorPk = new PublicKey(postAuthor);
     const [postPda] = getPostPda(postAuthorPk, postId);
     const [commentPda] = getCommentPda(postPda, commentIndex);
@@ -323,6 +555,61 @@ const actions: Record<string, ActionHandler> = {
     return program.methods
       .sendMessage(new BN(chatId), new BN(messageIndex), content, !!isPayment, new BN(paymentAmount || 0))
       .accounts({ message: messagePda, chat: chatPda, sender: user, payer: treasury, systemProgram: SystemProgram.programId })
+      .instruction();
+  },
+
+  // ── Private chat (MagicBlock TEE), base-layer legs — treasury-sponsored ──
+  // INBOX model: create_private_inbox → delegate_private_inbox (base, treasury-
+  // sponsored). init permission + append/read happen on the ER, client-side.
+  async createPrivateInbox(params, user, treasury, program) {
+    const { chatId } = params;
+    if (chatId === undefined) throw new Error("Missing chatId");
+    const [inboxPda] = getInboxPda(chatId);
+    return program.methods
+      .createPrivateInbox(new BN(chatId))
+      .accounts({ inbox: inboxPda, payer: treasury, systemProgram: SystemProgram.programId })
+      .instruction();
+  },
+
+  async delegatePrivateInbox(params, user, treasury, program) {
+    const { chatId } = params;
+    if (chatId === undefined) throw new Error("Missing chatId");
+    const [inboxPda] = getInboxPda(chatId);
+    return program.methods
+      .delegatePrivateInbox(new BN(chatId))
+      .accounts({
+        bufferPda: delegateBufferPdaFromDelegatedAccountAndOwnerProgram(inboxPda, PROGRAM_ID),
+        delegationRecordPda: delegationRecordPdaFromDelegatedAccount(inboxPda),
+        delegationMetadataPda: delegationMetadataPdaFromDelegatedAccount(inboxPda),
+        pda: inboxPda,
+        payer: treasury,
+        ownerProgram: PROGRAM_ID,
+        delegationProgram: DELEGATION_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .remainingAccounts([{ pubkey: TEE_VALIDATOR, isSigner: false, isWritable: false }])
+      .instruction();
+  },
+
+  async undelegatePrivateInbox(params, user, treasury, program) {
+    const { chatId } = params;
+    if (chatId === undefined) throw new Error("Missing chatId");
+    const [inboxPda] = getInboxPda(chatId);
+    return program.methods
+      .undelegatePrivateInbox()
+      .accounts({ payer: treasury, inbox: inboxPda, magicProgram: MAGIC_PROGRAM_ID, magicContext: MAGIC_CONTEXT_ID })
+      .instruction();
+  },
+
+  // Close an UNDELEGATED inbox and refund its rent to the treasury. Must run only
+  // after undelegation has returned the account to the base chain.
+  async closePrivateInbox(params, user, treasury, program) {
+    const { chatId } = params;
+    if (chatId === undefined) throw new Error("Missing chatId");
+    const [inboxPda] = getInboxPda(chatId);
+    return program.methods
+      .closePrivateInbox(new BN(chatId))
+      .accounts({ inbox: inboxPda, treasury, payer: treasury })
       .instruction();
   },
 
@@ -500,17 +787,32 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { action, params, walletAddress } = body;
+    const { action, params, walletAddress, actions: batchActions } = body;
 
-    if (!action || !walletAddress) {
-      return NextResponse.json({ error: "Missing action or walletAddress" }, { status: 400 });
+    if (!walletAddress) {
+      return NextResponse.json({ error: "Missing walletAddress" }, { status: 400 });
     }
 
-    // ── 2. VALIDATE ACTION EXISTS ──
-    const handler = actions[action];
-    if (!handler) {
-      console.error(`🚨 BLOCKED: Unknown action "${action}" from ${walletAddress}`);
-      return NextResponse.json({ error: "Unknown action" }, { status: 400 });
+    const requestedActions = Array.isArray(batchActions)
+      ? batchActions
+      : [{ action, params }];
+
+    if (!requestedActions.length) {
+      return NextResponse.json({ error: "No actions provided" }, { status: 400 });
+    }
+
+    if (requestedActions.length > 5) {
+      return NextResponse.json({ error: "Too many actions in one batch" }, { status: 400 });
+    }
+
+    for (const requested of requestedActions) {
+      if (!requested?.action || typeof requested.action !== "string") {
+        return NextResponse.json({ error: "Invalid action payload" }, { status: 400 });
+      }
+      if (!actions[requested.action]) {
+        console.error(`🚨 BLOCKED: Unknown action "${requested.action}" from ${walletAddress}`);
+        return NextResponse.json({ error: `Unknown action: ${requested.action}` }, { status: 400 });
+      }
     }
 
     let userPubkey: PublicKey;
@@ -531,11 +833,32 @@ export async function POST(request: NextRequest) {
 
     // ── 3. RATE LIMIT ──
     const clientIp = getClientIp(request);
-    if (isRateLimited(clientIp, ipTimestamps)) {
-      return NextResponse.json({ error: "Rate limited" }, { status: 429 });
+    sweepRateLimitStores();
+
+    // Tightest first: creating sponsored accounts costs the treasury rent.
+    const isSignup = requestedActions.some((r) => SIGNUP_ACTIONS.has(r.action));
+    if (
+      isSignup &&
+      isRateLimited(clientIp, signupIpTimestamps, SIGNUP_MAX_PER_IP, SIGNUP_WINDOW_MS)
+    ) {
+      console.warn(`⛔ signup rate limit hit from IP ${clientIp}`);
+      return NextResponse.json(
+        { error: "Too many new accounts from this network. Try again later." },
+        { status: 429, headers: { "Retry-After": "3600" } },
+      );
     }
-    if (isRateLimited(walletAddress, walletTimestamps)) {
-      return NextResponse.json({ error: "Rate limited" }, { status: 429 });
+
+    if (isRateLimited(clientIp, ipTimestamps, IP_MAX_PER_MIN, RATE_LIMIT_WINDOW_MS)) {
+      return NextResponse.json(
+        { error: "Rate limited" },
+        { status: 429, headers: { "Retry-After": "60" } },
+      );
+    }
+    if (isRateLimited(walletAddress, walletTimestamps, WALLET_MAX_PER_MIN, RATE_LIMIT_WINDOW_MS)) {
+      return NextResponse.json(
+        { error: "Rate limited" },
+        { status: 429, headers: { "Retry-After": "60" } },
+      );
     }
 
     const connection = new Connection(RPC_URL, "confirmed");
@@ -548,18 +871,31 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Platform treasury low" }, { status: 503 });
     }
 
-    // ── 5. BUILD THE INSTRUCTION — server controls everything ──
+    // ── 5. BUILD INSTRUCTION(S) — server controls everything ──
     const program = getProgram(connection, treasury);
-    let ix;
-    try {
-      ix = await handler(params || {}, userPubkey, treasury.publicKey, program);
-    } catch (err: any) {
-      console.error(`❌ Build failed for action "${action}":`, err?.message);
-      return NextResponse.json({ error: err?.message || "Failed to build instruction" }, { status: 400 });
+    const ixs: any[] = [];
+    for (const requested of requestedActions) {
+      const handler = actions[requested.action];
+      try {
+        const ix = await handler(requested.params || {}, userPubkey, treasury.publicKey, program);
+        // A handler may return one instruction or several (e.g. buyUsername
+        // prepends a buyer-funded ATA creation for the seller).
+        if (Array.isArray(ix)) ixs.push(...ix);
+        else ixs.push(ix);
+      } catch (err: any) {
+        console.error(`❌ Build failed for action "${requested.action}":`, err?.message);
+        return NextResponse.json({ error: err?.message || `Failed to build instruction: ${requested.action}` }, { status: 400 });
+      }
     }
 
     // ── 6. BUILD TX ──
-    const tx = new Transaction().add(ix);
+    const tx = new Transaction();
+    // Give the program the max heap (256KB). The program's memory footprint grew
+    // after the private-messaging upgrade; the default 32KB heap OOMs on some
+    // instructions (e.g. likePost). This restores them with no program redeploy.
+    tx.add(ComputeBudgetProgram.requestHeapFrame({ bytes: 256 * 1024 }));
+    tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }));
+    for (const ix of ixs) tx.add(ix);
     tx.feePayer = treasury.publicKey;
 
     // ── 7. FRESH BLOCKHASH ──
@@ -572,7 +908,8 @@ export async function POST(request: NextRequest) {
     // ── 9. RETURN partially-signed tx ──
     const serialized = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
 
-    console.log(`🔨 Built "${action}" for ${walletAddress.slice(0, 8)}.. | IP: ${clientIp}`);
+    const actionSummary = requestedActions.map((requested: any) => requested.action).join(",");
+    console.log(`🔨 Built "${actionSummary}" for ${walletAddress.slice(0, 8)}.. | IP: ${clientIp}`);
     return NextResponse.json({
       success: true,
       transaction: serialized.toString("base64"),

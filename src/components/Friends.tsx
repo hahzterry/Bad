@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { Search, UserPlus, UserMinus, UserCheck, Users, RefreshCw, Globe } from "lucide-react";
 import { useAppStore } from "@/lib/store";
+import { handleIpfsImgError } from "@/components/RichContent";
 import { toast } from "@/components/Toast";
 import { useProgram } from "@/hooks/useProgram";
 import { useWallet } from "@/hooks/usePrivyWallet";
@@ -219,7 +220,7 @@ export default function Friends() {
                     <div key={result.owner} className="flex items-center gap-3 p-3 rounded-xl bg-[#F8FAFC] hover:bg-[#F1F5F9] transition-colors">
                       <button type="button" onClick={() => navigateToProfile(result.owner)} className="flex-shrink-0 cursor-pointer">
                       {profileMap[result.owner]?.avatarUrl ? (
-                        <img src={profileMap[result.owner].avatarUrl} alt="" className="w-10 h-10 rounded-full object-cover border-2 border-white shadow-sm flex-shrink-0" />
+                        <img src={profileMap[result.owner].avatarUrl} onError={handleIpfsImgError} alt="" className="w-10 h-10 rounded-full object-cover border-2 border-white shadow-sm flex-shrink-0" />
                       ) : (
                         <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#EBF4FF] to-[#E0F2FE] flex items-center justify-center text-sm font-semibold text-[#2563EB] border-2 border-white shadow-sm flex-shrink-0">
                           {(result.displayName || result.username || "?").charAt(0).toUpperCase()}
@@ -323,7 +324,7 @@ export default function Friends() {
                   <div className="flex items-center gap-3">
                     <button type="button" onClick={() => navigateToProfile(addr)} className="flex-shrink-0 cursor-pointer">
                     {profile?.avatarUrl ? (
-                      <img src={profile.avatarUrl} alt="" className="w-11 h-11 rounded-full object-cover border-2 border-white shadow-sm flex-shrink-0" />
+                      <img src={profile.avatarUrl} onError={handleIpfsImgError} alt="" className="w-11 h-11 rounded-full object-cover border-2 border-white shadow-sm flex-shrink-0" />
                     ) : (
                       <div className="w-11 h-11 rounded-full bg-gradient-to-br from-[#EBF4FF] to-[#E0F2FE] flex items-center justify-center text-sm font-semibold text-[#2563EB] border-2 border-white shadow-sm flex-shrink-0">
                         {name.charAt(0)?.toUpperCase() || "?"}
@@ -396,7 +397,7 @@ export default function Friends() {
                   <div className="flex items-center gap-3">
                     <button type="button" onClick={() => navigateToProfile(addr)} className="flex-shrink-0 cursor-pointer">
                     {profile?.avatarUrl ? (
-                      <img src={profile.avatarUrl} alt="" className="w-11 h-11 rounded-full object-cover border-2 border-white shadow-sm flex-shrink-0" />
+                      <img src={profile.avatarUrl} onError={handleIpfsImgError} alt="" className="w-11 h-11 rounded-full object-cover border-2 border-white shadow-sm flex-shrink-0" />
                     ) : (
                       <div className="w-11 h-11 rounded-full bg-gradient-to-br from-[#F0FDF4] to-[#DCFCE7] flex items-center justify-center text-sm font-semibold text-[#16A34A] border-2 border-white shadow-sm flex-shrink-0">
                         {name.charAt(0)?.toUpperCase() || "?"}

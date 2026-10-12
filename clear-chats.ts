@@ -6,7 +6,7 @@ import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 
 const PROGRAM_ID = new PublicKey("EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ");
-const RPC = process.env.HELIUS_DEVNET_RPC || "https://api.devnet.solana.com";
+const RPC = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY_PRIVATE}`;
 
 async function main() {
   const treasury = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(process.env.TREASURY_PRIVATE_KEY!)));

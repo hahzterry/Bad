@@ -14,6 +14,8 @@ import {
 
 const PROGRAM_ID = new PublicKey("EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ");
 const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY_PRIVATE}`;
+const BAGS_API_KEY = (process.env.BAGS_API_KEY || "").trim();
+const BAGS_PARTNER_WALLET = (process.env.BAGS_PARTNER_WALLET || "").trim();
 
 // Anchor account discriminators as base58 (first 8 bytes of SHA256("account:<Name>"))
 const DISCRIMINATORS: Record<string, string> = {
@@ -32,7 +34,9 @@ interface StatsCache {
 }
 
 let cache: StatsCache | null = null;
-const CACHE_TTL = 60_000; // 60 seconds
+let cachedTxCount: { value: number; fetchedAt: number } | null = null;
+const CACHE_TTL = 10 * 60_000;      // 10 minutes — account counts
+const TX_CACHE_TTL = 60 * 60_000;   // 1 hour   — tx count (expensive paginated query)
 
 /**
  * Paginate through ALL transaction signatures for the program.
@@ -71,7 +75,25 @@ async function fetchStats(): Promise<Record<string, number>> {
 
   const entries = Object.entries(DISCRIMINATORS);
 
-  const [accountResults, txCount] = await Promise.all([
+  // Fetch tokens launched via Shyft's partner config (on-chain feeShareConfigHeader accounts)
+  const BAGS_PARTNER_CONFIG_PDA = (process.env.BAGS_PARTNER_CONFIG_PDA || "B94bGwVuX7tWX8VkkyBZLmQESJ537URMcJcVkF8tdi5T").trim();
+  const getBagsTokenCount = async (): Promise<number> => {
+    try {
+      if (!BAGS_API_KEY) return 0;
+      const { Connection: Conn } = await import("@solana/web3.js");
+      const { BagsSDK } = await import("@bagsfm/bags-sdk");
+      const conn = new Conn(RPC_URL, "confirmed");
+      const sdk = new BagsSDK(BAGS_API_KEY, conn, "confirmed");
+      const feeShareProg = sdk.state.getBagsFeeShareV2Program();
+      // Layout: discriminator(8) + baseMint(32) + quoteMint(32) + partner(32) + partnerConfig(32) → offset 104
+      const accounts = await (feeShareProg.account as any).feeShareConfigHeader.all([
+        { memcmp: { offset: 104, bytes: BAGS_PARTNER_CONFIG_PDA } },
+      ]);
+      return accounts.length;
+    } catch { return 0; }
+  };
+
+  const [accountResults, txCount, bagsTokenCount] = await Promise.all([
     // 1) Account counts by type
     Promise.allSettled(
       entries.map(([name, disc]) =>
@@ -81,11 +103,21 @@ async function fetchStats(): Promise<Record<string, number>> {
         }).then(accounts => ({ name, count: accounts.length }))
       )
     ),
-    // 2) Total transaction count (paginated, all-time)
-    getTotalTransactions(connection).catch((err) => {
-      console.error("Failed to fetch tx count:", err?.message || err);
-      return cache?.data.Transactions || 0;
-    }),
+    // 2) Total transaction count — cached separately for 1 hour (paginated, expensive)
+    (async () => {
+      if (cachedTxCount && Date.now() - cachedTxCount.fetchedAt < TX_CACHE_TTL) {
+        return cachedTxCount.value;
+      }
+      try {
+        const count = await getTotalTransactions(connection);
+        cachedTxCount = { value: count, fetchedAt: Date.now() };
+        return count;
+      } catch (err: any) {
+        console.error("Failed to fetch tx count:", err?.message || err);
+        return cachedTxCount?.value || cache?.data.Transactions || 0;
+      }
+    })(),
+    getBagsTokenCount(),
   ]);
 
   for (const result of accountResults) {
@@ -99,6 +131,7 @@ async function fetchStats(): Promise<Record<string, number>> {
   }
 
   stats.Transactions = txCount;
+  stats.BagsTokens = bagsTokenCount;
 
   cache = { data: stats, fetchedAt: Date.now() };
   return stats;
@@ -117,9 +150,10 @@ export async function GET() {
       chats: stats.Chat || 0,
       messages: stats.Message || 0,
       transactions: stats.Transactions || 0,
+      tokens_launched: stats.BagsTokens || 0,
     }, {
       headers: {
-        "Cache-Control": "public, s-maxage=60, stale-while-revalidate=120",
+        "Cache-Control": "public, s-maxage=600, stale-while-revalidate=1200",
       },
     });
   } catch (err: any) {

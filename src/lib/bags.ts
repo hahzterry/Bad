@@ -108,6 +108,38 @@ export async function launchCreatorToken(params: TokenLaunchParams): Promise<{
   return data.response;
 }
 
+/** Social platforms that can be resolved to a fee-share wallet */
+export type FeeProvider = "twitter" | "tiktok" | "kick" | "github";
+
+export interface ResolvedFeeWallet {
+  wallet: string;
+  provider: string;
+  platformData?: {
+    id?: string;
+    username?: string;
+    display_name?: string;
+    avatar_url?: string;
+  };
+}
+
+/**
+ * Resolve a social handle (twitter/tiktok/kick/github) to its Bags fee-share wallet.
+ * Used when a creator wants to direct trading fees to another user.
+ */
+export async function resolveFeeWallet(
+  username: string,
+  provider: FeeProvider
+): Promise<ResolvedFeeWallet> {
+  const res = await fetch(`${API_BASE}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "resolve-fee-wallet", username, provider }),
+  });
+  const data = await res.json();
+  if (!data.success) throw new Error(data.error || "Could not find a wallet for that handle");
+  return data.response;
+}
+
 /**
  * Get a trade quote for swapping tokens
  */

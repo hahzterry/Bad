@@ -35,3 +35,8 @@ test-priority-fee-attacks.ts
 test-priority-real.ts
 test-real-full-audit.ts
 test-real-tampering.ts
+.env*.local
+
+# Local Claude config (not for the repo)
+.claude/
+

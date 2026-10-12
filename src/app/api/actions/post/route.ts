@@ -27,6 +27,7 @@ const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_AP
 const PROFILE_SEED = Buffer.from("profile");
 const POST_SEED = Buffer.from("post");
 const REACTION_SEED = Buffer.from("reaction");
+const LIKE_SEED = Buffer.from("like");
 
 function toLEBytes(num: number): Uint8Array {
   const buf = new ArrayBuffer(8);
@@ -42,6 +43,9 @@ function getPostPda(author: PublicKey, postId: number): [PublicKey, number] {
 }
 function getReactionPda(postPda: PublicKey, user: PublicKey): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([REACTION_SEED, postPda.toBuffer(), user.toBuffer()], PROGRAM_ID);
+}
+function getLikeRecordPda(postPda: PublicKey, liker: PublicKey): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([LIKE_SEED, postPda.toBuffer(), liker.toBuffer()], PROGRAM_ID);
 }
 
 // ── Treasury ──
@@ -85,11 +89,13 @@ const ACTION_HEADERS: Record<string, string> = {
 };
 
 // ── Expand IPFS CID to full URL (same as client-side logic) ──
+const IPFS_GATEWAY =
+  (process.env.PINATA_GATEWAY || process.env.NEXT_PUBLIC_PINATA_GATEWAY || "amethyst-secondary-orca-737.mypinata.cloud").trim();
 function expandIpfs(content: string): string {
   if (!content) return "";
   return content.replace(
     /\b(Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[a-zA-Z0-9]{50,})\b/g,
-    (cid) => `https://gateway.pinata.cloud/ipfs/${cid}`
+    (cid) => `https://${IPFS_GATEWAY}/ipfs/${cid}`
   );
 }
 
@@ -324,9 +330,10 @@ export async function POST(request: NextRequest) {
       }
 
       const [postPda] = getPostPda(authorPk, postId);
+      const [likeRecordPda] = getLikeRecordPda(postPda, userPk);
       const ix = await program.methods
         .likePost(new BN(postId))
-        .accountsPartial({ post: postPda, profile: profilePda, user: userPk })
+        .accountsPartial({ post: postPda, profile: profilePda, likeRecord: likeRecordPda, user: userPk, payer: treasury.publicKey, systemProgram: SystemProgram.programId })
         .instruction();
 
       tx.add(ix);

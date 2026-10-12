@@ -1,18 +1,123 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Heart, MessageCircle, Share2, Repeat2, Globe, Send, Shield, RefreshCw, Image as ImageIcon, X, BadgeCheck, Trash2, Lock, Unlock, DollarSign, Loader2, Coins, TrendingUp, BarChart3, Clock, CheckCircle2 } from "lucide-react";
+import type { ReactElement } from "react";
+import { Heart, MessageCircle, Share2, Repeat2, Globe, Send, Shield, RefreshCw, Image as ImageIcon, X, BadgeCheck, Trash2, Lock, Unlock, DollarSign, Loader2, Coins, TrendingUp, BarChart3, Clock, CheckCircle2, Pencil, ListPlus, Plus, ChevronDown, ChevronUp } from "lucide-react";
 
 // Gold badge for OG / founder accounts
 const GOLD_BADGE_USERNAMES = ["shaan", "shyft"];
+// Profiles created before this Unix timestamp (May 12 2026) keep their blue badge
+const BLUE_BADGE_CUTOFF_UNIX = 1778544000;
 import { useAppStore } from "@/lib/store";
 import { toast } from "@/components/Toast";
-import { RichContent, MediaBar, uploadMedia, isVideoFile } from "@/components/RichContent";
+import { RichContent, MediaBar, uploadMedia, isVideoFile, handleIpfsImgError } from "@/components/RichContent";
 import { useProgram } from "@/hooks/useProgram";
 import { useWallet, useConnection, pollConfirmation } from "@/hooks/usePrivyWallet";
+import { useX402Payment } from "@/hooks/useX402Payment";
 import { PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { ShyftClient, clearRpcCache } from "@/lib/program";
 import ProfileHoverCard from "@/components/ProfileHoverCard";
+import TrendingTokenCard, { type TrendingToken } from "@/components/TrendingTokenCard";
+import TokenTrade from "@/components/TokenTrade";
+import FeaturedToken from "@/components/FeaturedToken";
+import TokenLaunch from "@/components/TokenLaunch";
+import PostTokenCard from "@/components/PostTokenCard";
+
+/** A post that launched a coin is tagged on-chain with "COIN:<mint>" (hidden from display). */
+const COIN_MARKER_RE = /\n?COIN:([1-9A-HJ-NP-Za-km-z]{32,44})/;
+export function extractCoinMint(content: string): string {
+  return content?.match(COIN_MARKER_RE)?.[1] || "";
+}
+export function stripCoinMarker(content: string): string {
+  return (content || "").replace(COIN_MARKER_RE, "").trimEnd();
+}
+
+/** Pull the first image URL out of a post's content for use as a token image. */
+function firstImageUrl(content: string): string {
+  const urls = content.match(/https?:\/\/[^\s<]+/gi) || [];
+  for (const u of urls) {
+    if (/\.(png|jpe?g|gif|webp|avif)(\?|$)/i.test(u) || /\/ipfs\//i.test(u)) return u;
+  }
+  return "";
+}
+
+/** Strip Shyft content prefixes (PAID|, COMM|, RT|, THREAD|) and URLs to get clean text. */
+function cleanPostText(content: string): string {
+  let t = stripCoinMarker(content || "");
+  if (t.startsWith("THREAD|")) t = t.split("|").slice(4).join("|");
+  if (t.startsWith("PAID|")) t = t.split("|").slice(2).join("|");
+  else if (t.startsWith("COMM|")) t = t.split("|").slice(2).join("|");
+  else if (t.startsWith("RT|")) t = t.split("|").slice(2).join("|");
+  return t.replace(/https?:\/\/[^\s]+/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Parse a thread post: content starts with THREAD|<rootId>|<index>|<total>|<text>
+ * Threads are chained client-side (no on-chain schema change) — each segment is a
+ * normal post tagged with its shared rootId and position, then grouped on render.
+ */
+export function parseThreadPost(content: string): { isThread: boolean; rootId: string; index: number; total: number; actualContent: string } {
+  if (content && content.startsWith("THREAD|")) {
+    const parts = content.split("|");
+    if (parts.length >= 5) {
+      const rootId = parts[1];
+      const index = parseInt(parts[2], 10);
+      const total = parseInt(parts[3], 10);
+      const actualContent = parts.slice(4).join("|");
+      if (rootId && !isNaN(index) && !isNaN(total) && total > 1) {
+        return { isThread: true, rootId, index, total, actualContent };
+      }
+    }
+  }
+  return { isThread: false, rootId: "", index: 0, total: 1, actualContent: content };
+}
+
+/**
+ * Renders a grouped thread with a collapse/expand toggle. Collapsed shows only
+ * the first post + a "Show N more" button so long threads don't flood the feed.
+ * Threads longer than 3 posts start collapsed.
+ */
+function ThreadGroup({
+  members,
+  renderMember,
+}: {
+  members: { post: any; actualContent: string }[];
+  renderMember: (m: { post: any; actualContent: string }, index: number) => React.ReactNode;
+}) {
+  const total = members.length;
+  const [collapsed, setCollapsed] = useState(total > 3);
+  const visible = collapsed ? members.slice(0, 1) : members;
+
+  return (
+    <div className="rounded-2xl">
+      <button
+        onClick={() => setCollapsed((c) => !c)}
+        className="flex items-center gap-1.5 mb-1 pl-1 w-full text-[11px] font-bold uppercase tracking-wide text-[#2563EB] hover:opacity-80 transition-opacity"
+      >
+        <ListPlus className="w-3.5 h-3.5" /> Thread · {total} posts
+        <span className="ml-auto flex items-center gap-1 text-[#94A3B8] normal-case tracking-normal font-medium">
+          {collapsed ? <>Expand <ChevronDown className="w-3.5 h-3.5" /></> : <>Collapse <ChevronUp className="w-3.5 h-3.5" /></>}
+        </span>
+      </button>
+      <div className="space-y-2 border-l-2 border-[#2563EB]/20 pl-2">
+        {visible.map((m, mi) => (
+          <div key={m.post.publicKey}>
+            <div className="text-[10px] font-bold text-[#94A3B8] pl-1 mb-0.5 tabular-nums">{mi + 1}/{total}</div>
+            {renderMember(m, mi)}
+          </div>
+        ))}
+        {collapsed && total > 1 && (
+          <button
+            onClick={() => setCollapsed(false)}
+            className="text-xs font-semibold text-[#2563EB] hover:text-[#1D4ED8] pl-1 py-1.5 flex items-center gap-1"
+          >
+            Show {total - 1} more {total - 1 === 1 ? "post" : "posts"} <ChevronDown className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /** Parse a paid post: content starts with PAID|<price>|<actual content> */
 function parsePaidPost(content: string): { isPaid: boolean; price: number; actualContent: string } {
@@ -96,9 +201,10 @@ export function OnChainPostCard({
   onDelete: () => void;
   defaultShowComments?: boolean;
 }) {
-  const { likedPosts, addLikedPost, isConnected, currentUser, navigateToProfile, unlockedPosts, addUnlockedPost, addPayment, postTips, addPostTip } = useAppStore();
+  const { likedPosts, addLikedPost, isConnected, currentUser, navigateToProfile, unlockedPosts, addUnlockedPost, postReceipts, addPostReceipt, addPayment, postTips, addPostTip } = useAppStore();
   const { publicKey: walletKey, signTransaction } = useWallet();
   const { connection } = useConnection();
+  const { unlockPost } = useX402Payment();
   const [showComments, setShowComments] = useState(defaultShowComments);
   const [showReactions, setShowReactions] = useState(false);
   const [commentText, setCommentText] = useState("");
@@ -108,8 +214,15 @@ export function OnChainPostCard({
   const [localLikeBoost, setLocalLikeBoost] = useState(0);
   const [reposting, setReposting] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [localContent, setLocalContent] = useState<string | null>(null);
+  // If this post launched a coin, its mint is tagged on-chain in the content.
+  const coinMint = extractCoinMint(localContent ?? post.content);
   const [unlocking, setUnlocking] = useState(false);
   const [showTip, setShowTip] = useState(false);
+  const [showLaunch, setShowLaunch] = useState(false);
   const [tipping, setTipping] = useState(false);
   const [tipAmount, setTipAmount] = useState("");
   const [flexing, setFlexing] = useState(false);
@@ -125,49 +238,30 @@ export function OnChainPostCard({
   const totalLikes = Number(post.likes || 0) + localLikeBoost;
   const totalComments = postComments.length;
 
-  /** Unlock a paid post by sending SOL directly to the creator's wallet */
+  /** Unlock a paid post via x402 — quote → pay (creator + 0.1% DNA fee) → finalize → receipt */
   const handleUnlock = async () => {
     if (!walletKey || !signTransaction || !connection || unlocking) return;
     setUnlocking(true);
     try {
-      const creatorPubkey = new PublicKey(post.author);
-      const lamports = Math.round(postPrice * LAMPORTS_PER_SOL);
+      toast("privacy", "Unlocking...", `Processing payment via x402`);
 
-      // Check balance
-      const balance = await connection.getBalance(walletKey);
-      if (balance < lamports + 10000) {
-        toast("error", "Insufficient SOL", `You need at least ${postPrice} SOL to unlock this post.`);
-        setUnlocking(false);
-        return;
-      }
-
-      toast("privacy", "Unlocking...", `Sending ${postPrice} SOL to creator`);
-
-      const tx = new Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey: walletKey,
-          toPubkey: creatorPubkey,
-          lamports,
-        })
+      const { sig, receiptId, totalSOL } = await unlockPost(
+        post.publicKey,
+        post.author,
+        postPrice,
       );
-
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-      tx.recentBlockhash = blockhash;
-      tx.feePayer = walletKey;
-
-      const signedTx = await signTransaction(tx);
-      const sig = await connection.sendRawTransaction(signedTx.serialize(), { skipPreflight: false });
 
       // Poll for confirmation via HTTP — no WebSocket needed
       const confirmed = await pollConfirmation(connection, sig);
 
-      // Always unlock — user already signed & sent the tx
       addUnlockedPost(post.publicKey);
+      if (receiptId) addPostReceipt(post.publicKey, receiptId);
+
       addPayment({
         id: sig,
         sender: "me",
         recipient: post.author,
-        amount: postPrice,
+        amount: totalSOL,
         token: "SOL",
         status: "completed",
         isPrivate: false,
@@ -176,7 +270,7 @@ export function OnChainPostCard({
       });
 
       if (confirmed) {
-        toast("success", "Post unlocked! 🔓", `Paid ${postPrice} SOL — TX: ${sig.slice(0, 8)}...`);
+        toast("success", "Post unlocked! 🔓", receiptId ? `Receipt: ${receiptId.slice(0, 12)}...` : `TX: ${sig.slice(0, 8)}...`);
       } else {
         toast("success", "Post unlocked! 🔓", `Payment sent — TX: ${sig.slice(0, 8)}...`);
       }
@@ -290,12 +384,16 @@ export function OnChainPostCard({
       toast("success", "Liked! ❤️", "Recorded on-chain");
     } catch (err: any) {
       console.error("Like error:", err);
-      if (err?.message?.includes("User rejected") || err?.message?.includes("rejected the request")) {
+      const msg = err?.message || "";
+      if (msg.includes("already in use") || msg.includes("0x0")) {
+        // Already liked on-chain (e.g. liked from mobile) — silently mark as liked
+        addLikedPost(post.publicKey);
+      } else if (msg.includes("User rejected") || msg.includes("rejected the request")) {
         toast("error", "Like cancelled", "You rejected the transaction");
-      } else if (err?.message?.includes("insufficient") || err?.message?.includes("0x1")) {
+      } else if (msg.includes("insufficient") || msg.includes("0x1")) {
         toast("error", "Insufficient SOL", "Your wallet needs more SOL to interact.");
       } else {
-        toast("error", "Like failed", err?.message?.slice(0, 80) || "Please try again");
+        toast("error", "Like failed", msg.slice(0, 80) || "Please try again");
       }
     }
     setLiking(false);
@@ -384,7 +482,7 @@ export function OnChainPostCard({
           className="flex items-center gap-2.5 sm:gap-3 flex-1 min-w-0 text-left group cursor-pointer"
         >
         {profile?.avatarUrl ? (
-          <img src={profile.avatarUrl} alt={displayName} className="w-10 h-10 sm:w-11 sm:h-11 rounded-full object-cover border-2 border-white shadow-sm flex-shrink-0 group-hover:ring-2 group-hover:ring-[#2563EB]/30 transition-all" />
+          <img src={profile.avatarUrl} onError={handleIpfsImgError} alt={displayName} className="w-10 h-10 sm:w-11 sm:h-11 rounded-full object-cover border-2 border-white shadow-sm flex-shrink-0 group-hover:ring-2 group-hover:ring-[#2563EB]/30 transition-all" />
         ) : (
           <div className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center text-lg sm:text-xl border-2 border-white shadow-sm flex-shrink-0 group-hover:ring-2 group-hover:ring-[#2563EB]/30 transition-all ${
             isMe
@@ -397,7 +495,11 @@ export function OnChainPostCard({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
             <span className="font-semibold text-[#1A1A2E] text-sm truncate group-hover:text-[#2563EB] transition-colors">{displayName}</span>
-            <BadgeCheck className={`w-3.5 h-3.5 flex-shrink-0 ${GOLD_BADGE_USERNAMES.includes(realUsername.toLowerCase()) ? "text-[#F59E0B]" : "text-[#2563EB]"}`} />
+            {GOLD_BADGE_USERNAMES.includes(realUsername.toLowerCase()) ? (
+              <BadgeCheck className="w-3.5 h-3.5 flex-shrink-0 text-[#F59E0B]" />
+            ) : (() => { const ts = parseInt(String(profile?.createdAt || 0), 10); return ts > 0 && ts < BLUE_BADGE_CUTOFF_UNIX; })() ? (
+              <BadgeCheck className="w-3.5 h-3.5 flex-shrink-0 text-[#2563EB]" />
+            ) : null}
             <span className="text-xs text-[#94A3B8] truncate group-hover:text-[#2563EB]/70 transition-colors">@{username}</span>
           </div>
           <div className="flex items-center gap-1.5 mt-0.5">
@@ -418,11 +520,59 @@ export function OnChainPostCard({
         </ProfileHoverCard>
       </div>
 
+      {/* Inline edit modal */}
+      {editing && (
+        <div className="mb-3 pl-0 sm:pl-14">
+          <textarea
+            autoFocus
+            value={editText}
+            onChange={e => setEditText(e.target.value)}
+            maxLength={500}
+            rows={4}
+            className="w-full rounded-xl border border-[#2563EB] bg-[#F8FAFC] dark:bg-[#1E293B] text-[#0F172A] dark:text-white text-sm p-3 resize-none focus:outline-none focus:ring-2 focus:ring-[#2563EB]"
+          />
+          <div className="flex items-center justify-between mt-2">
+            <span className="text-xs text-[#94A3B8]">{editText.length}/500</span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setEditing(false)}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium text-[#64748B] hover:bg-[#F1F5F9] transition-all"
+              >Cancel</button>
+              <button
+                disabled={savingEdit || !editText.trim() || editText.trim() === (localContent ?? post.content)}
+                onClick={async () => {
+                  if (!program || !editText.trim()) return;
+                  setSavingEdit(true);
+                  try {
+                    await program.editPost(Number(post.postId), editText.trim());
+                    setLocalContent(editText.trim());
+                    setEditing(false);
+                    toast("success", "Post updated ✏️", "Edit saved on-chain");
+                  } catch (err: any) {
+                    if (err?.message?.includes("User rejected") || err?.message?.includes("rejected the request")) {
+                      toast("error", "Edit cancelled", "You rejected the transaction");
+                    } else {
+                      toast("error", "Edit failed", err?.message?.slice(0, 80) || "Please try again");
+                    }
+                  }
+                  setSavingEdit(false);
+                }}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#2563EB] text-white hover:bg-[#1D4ED8] disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-1.5"
+              >
+                {savingEdit ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Content */}
       <div className="mb-3 pl-0 sm:pl-14">
         {(() => {
-          // Determine the content to render (use actualContent for paid posts that are unlocked)
-          const renderContent = isPaid && isUnlocked ? actualContent : post.content;
+          // Determine the content to render (use localContent if edited, actualContent for paid posts that are unlocked)
+          // Strip the hidden COIN:<mint> tag — it's surfaced as a token card below instead.
+          const renderContent = stripCoinMarker(localContent ?? (isPaid && isUnlocked ? actualContent : post.content));
 
           // Paid post — locked state
           if (isPaid && !isUnlocked) {
@@ -437,12 +587,12 @@ export function OnChainPostCard({
                 </div>
                 {/* Unlock overlay */}
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="bg-gradient-to-br from-amber-50 to-orange-50 border border-amber-200 rounded-2xl px-5 py-4 text-center shadow-lg max-w-[280px]">
-                    <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center mx-auto mb-2">
-                      <Lock className="w-5 h-5 text-amber-600" />
+                  <div className="bg-gradient-to-br from-amber-50 to-orange-50 dark:from-[#1E1E2E] dark:to-[#1A1A2E] border border-amber-200 dark:border-white/10 rounded-2xl px-5 py-4 text-center shadow-lg max-w-[280px]">
+                    <div className="w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center mx-auto mb-2">
+                      <Lock className="w-5 h-5 text-amber-600 dark:text-amber-400" />
                     </div>
-                    <p className="text-sm font-semibold text-[#1A1A2E] mb-1">Paid Content</p>
-                    <p className="text-xs text-[#64748B] mb-3">
+                    <p className="text-sm font-semibold text-[#1A1A2E] dark:text-white mb-1">Paid Content</p>
+                    <p className="text-xs text-[#64748B] dark:text-[#94A3B8] mb-3">
                       Unlock this post for <span className="font-bold text-amber-600">{postPrice} SOL</span>
                     </p>
                     <button
@@ -462,7 +612,7 @@ export function OnChainPostCard({
                         </>
                       )}
                     </button>
-                    <p className="text-[10px] text-[#94A3B8] mt-2">Payment goes directly to creator&apos;s wallet</p>
+                    <p className="text-[10px] text-[#94A3B8] mt-2">Secured by x402 · payment goes directly to creator</p>
                   </div>
                 </div>
                 {/* Spacer so the card has enough height */}
@@ -473,11 +623,12 @@ export function OnChainPostCard({
 
           // Paid post — unlocked (show badge + content)
           if (isPaid && isUnlocked) {
+            const receipt = postReceipts[post.publicKey];
             return (
               <div>
                 {!isMe && (
-                  <div className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full mb-2">
-                    <Unlock className="w-2.5 h-2.5" /> Unlocked
+                  <div className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 bg-emerald-50 dark:bg-emerald-900/20 dark:text-emerald-400 px-2 py-0.5 rounded-full mb-2" title={receipt ? `x402 receipt: ${receipt}` : undefined}>
+                    <Unlock className="w-2.5 h-2.5" /> Unlocked{receipt ? " · x402" : ""}
                   </div>
                 )}
                 {isMe && (
@@ -540,6 +691,11 @@ export function OnChainPostCard({
           return <RichContent content={renderContent} />;
         })()}
       </div>
+
+      {/* Token card — shown when this post has launched a coin */}
+      {coinMint && (
+        <PostTokenCard mint={coinMint} fallbackImage={firstImageUrl(localContent ?? post.content)} />
+      )}
 
       {/* Reaction pills (show aggregated reactions) */}
       {postReactions.length > 0 && (
@@ -716,7 +872,8 @@ export function OnChainPostCard({
             setReposting(true);
             try {
               const authorName = profile?.username ? `@${profile.username}` : post.author.slice(0, 8);
-              const preview = post.content.length > 200 ? post.content.slice(0, 200) + "..." : post.content;
+              const cleanForRepost = stripCoinMarker(post.content);
+              const preview = cleanForRepost.length > 200 ? cleanForRepost.slice(0, 200) + "..." : cleanForRepost;
               const repostContent = `RT|${authorName}|${preview}`;
               onRepost(repostContent);
               toast("success", "Reposted! 🔁", "Creating on-chain repost...");
@@ -738,7 +895,7 @@ export function OnChainPostCard({
             const authorName = profile?.username ? `@${profile.username}` : post.author.slice(0, 8);
             const postUrl = `https://baddie.stream/post/${post.author}-${post.postId}`;
             // Clean share text: strip IPFS hashes, URLs, and protocol prefixes for tweet-friendly text
-            let rawText = post.content || "";
+            let rawText = stripCoinMarker(post.content || "");
             // Strip PAID|, COMM|, RT| prefixes
             if (rawText.startsWith("PAID|")) rawText = "🔒 Paid post";
             else if (rawText.startsWith("COMM|")) rawText = rawText.split("|").slice(2).join("|");
@@ -768,6 +925,32 @@ export function OnChainPostCard({
         >
           <Share2 className="w-4 h-4" />
         </button>
+
+        {/* Edit (own posts only) */}
+        {isMe && !isPaid && (
+          <button
+            onClick={() => {
+              setEditText(localContent ?? post.content);
+              setEditing(true);
+            }}
+            className="touch-active flex items-center gap-1.5 px-3 py-2 sm:py-1.5 rounded-lg text-xs font-medium text-[#94A3B8] hover:text-[#2563EB] hover:bg-[#EBF4FF] active:bg-[#EBF4FF] transition-all"
+          >
+            <Pencil className="w-4 h-4" />
+          </button>
+        )}
+
+        {/* Launch as coin (own posts only) — turn the post into a tradeable token.
+            The post owner pays the launch fee (NOT sponsored, unlike posting).
+            Hidden once the post already has a coin. */}
+        {isMe && !isPaid && !coinMint && (
+          <button
+            onClick={() => setShowLaunch(true)}
+            title="Launch this post as a coin"
+            className="touch-active flex items-center gap-1.5 px-3 py-2 sm:py-1.5 rounded-lg text-xs font-medium text-[#94A3B8] hover:text-[#D97706] hover:bg-[#FFFBEB] active:bg-[#FFFBEB] transition-all"
+          >
+            <Coins className="w-4 h-4" />
+          </button>
+        )}
 
         {/* Delete (own posts only) */}
         {isMe && (
@@ -873,7 +1056,7 @@ export function OnChainPostCard({
                 <ProfileHoverCard walletAddress={comment.author} profile={commenterProfile}>
                 <button type="button" onClick={() => navigateToProfile(comment.author)} className="flex-shrink-0 group cursor-pointer">
                 {commenterProfile?.avatarUrl ? (
-                  <img src={commenterProfile.avatarUrl} alt="" className="w-7 h-7 rounded-full object-cover flex-shrink-0 group-hover:ring-2 group-hover:ring-[#2563EB]/30 transition-all" />
+                  <img src={commenterProfile.avatarUrl} onError={handleIpfsImgError} alt="" className="w-7 h-7 rounded-full object-cover flex-shrink-0 group-hover:ring-2 group-hover:ring-[#2563EB]/30 transition-all" />
                 ) : (
                   <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold flex-shrink-0 group-hover:ring-2 group-hover:ring-[#2563EB]/30 transition-all ${
                     isMyComment ? "bg-[#EFF6FF] text-[#2563EB]" : "bg-[#F1F5F9] text-[#64748B]"
@@ -951,6 +1134,36 @@ export function OnChainPostCard({
             </div>
           )}
         </div>
+      )}
+
+      {/* Launch-as-coin modal (own posts). Pre-filled from the post; owner pays the fee. */}
+      {showLaunch && (
+        <TokenLaunch
+          username={profile?.username}
+          prefill={{
+            name: profile?.username ? `${profile.username}` : undefined,
+            description: cleanPostText(localContent ?? post.content) || undefined,
+            imageUrl: firstImageUrl(localContent ?? post.content) || profile?.avatarUrl || undefined,
+            twitter: profile?.twitter || undefined,
+          }}
+          onClose={() => setShowLaunch(false)}
+          onSuccess={async (mint) => {
+            setShowLaunch(false);
+            toast("success", "Your post is now a coin", "Live on Solana");
+            // Tag the post on-chain with the mint so the token card shows for everyone.
+            try {
+              const base = localContent ?? post.content;
+              if (program && mint && !extractCoinMint(base)) {
+                const tagged = `${base}\nCOIN:${mint}`;
+                setLocalContent(tagged); // optimistic — card appears immediately
+                await program.editPost(Number(post.postId), tagged);
+              }
+            } catch (err) {
+              // Token still launched; tagging is best-effort (e.g. content length limit).
+              console.warn("Failed to tag post with coin mint:", err);
+            }
+          }}
+        />
       )}
     </div>
   );
@@ -1048,6 +1261,7 @@ function PollCard({
         {profile?.avatarUrl ? (
           <img
             src={profile.avatarUrl}
+            onError={handleIpfsImgError}
             alt=""
             className="w-10 h-10 rounded-full object-cover cursor-pointer border-2 border-white shadow-sm"
             onClick={() => navigateToProfile(poll.creator)}
@@ -1071,7 +1285,7 @@ function PollCard({
             <BarChart3 className="w-3.5 h-3.5 text-purple-500 flex-shrink-0" />
             <span className="text-xs font-medium text-purple-500">Poll</span>
           </div>
-          <div className="flex items-center gap-2 text-xs text-[#94A3B8]">
+          <div className="flex items-center gap-2 text-xs text-[#64748B]">
             <span>{timeAgo(poll.createdAt)}</span>
             <span>·</span>
             <div className="flex items-center gap-1">
@@ -1086,7 +1300,7 @@ function PollCard({
           <button
             onClick={handleClose}
             disabled={closing}
-            className="text-xs text-[#94A3B8] hover:text-red-500 transition-colors px-2 py-1"
+            className="text-xs text-[#64748B] hover:text-red-500 transition-colors px-2 py-1"
           >
             {closing ? "Closing..." : "End Poll"}
           </button>
@@ -1139,7 +1353,7 @@ function PollCard({
                 </div>
                 {showResults && (
                   <span className={`text-sm font-bold flex-shrink-0 ml-2 ${
-                    isWinner ? "text-purple-600" : "text-[#94A3B8]"
+                    isWinner ? "text-purple-600" : "text-[#475569]"
                   }`}>
                     {pct}%
                   </span>
@@ -1152,7 +1366,7 @@ function PollCard({
 
       {/* Footer */}
       <div className="flex items-center justify-between mt-3 pt-2.5 border-t border-[#F1F5F9]">
-        <span className="text-xs text-[#94A3B8]">
+        <span className="text-xs text-[#64748B]">
           {totalVotes} vote{totalVotes !== 1 ? "s" : ""}
         </span>
         {voting && (
@@ -1175,6 +1389,8 @@ export default function Feed() {
   const [profileMap, setProfileMap] = useState<Record<string, any>>({});
   const [allComments, setAllComments] = useState<any[]>([]);
   const [allReactions, setAllReactions] = useState<any[]>([]);
+  const [trendingTokens, setTrendingTokens] = useState<TrendingToken[]>([]);
+  const [selectedTrendingToken, setSelectedTrendingToken] = useState<TrendingToken | null>(null);
 
   const [posting, setPosting] = useState(false);
   const [mediaPreview, setMediaPreview] = useState<string | null>(null);
@@ -1183,6 +1399,10 @@ export default function Feed() {
   const [uploading, setUploading] = useState(false);
   const [isPaidPost, setIsPaidPost] = useState(false);
   const [paidPrice, setPaidPrice] = useState("0.01");
+
+  // Thread composer state — extra segments beyond the main `newPost` box
+  const [threadMode, setThreadMode] = useState(false);
+  const [threadSegments, setThreadSegments] = useState<string[]>([]);
 
   // Poll creation state
   const [isPollMode, setIsPollMode] = useState(false);
@@ -1209,6 +1429,27 @@ export default function Feed() {
     return () => { delete (window as any).__shyftMentionClick; };
   }, [profileMap, navigateToProfile]);
 
+  // $TICKER click handler — opens trade modal for the tapped token
+  useEffect(() => {
+    (window as any).__shyftTickerClick = (symbol: string, tickerData: any) => {
+      const found = trendingTokens.find((t) => t.symbol.toUpperCase() === symbol.toUpperCase());
+      if (found) {
+        setSelectedTrendingToken(found);
+        return;
+      }
+      // Token not in trending list — build from DexScreener data
+      setSelectedTrendingToken({
+        tokenMint: tickerData.mint,
+        name: tickerData.name || symbol,
+        symbol: symbol.toUpperCase(),
+        image: tickerData.image || "",
+        priceUsd: tickerData.price,
+        priceChange24h: tickerData.change24h,
+      });
+    };
+    return () => { delete (window as any).__shyftTickerClick; };
+  }, [trendingTokens, setSelectedTrendingToken]);
+
   // Focus post from notification click — scroll to post and open comments
   useEffect(() => {
     if (!focusPostKey || onchainPosts.length === 0) return;
@@ -1229,13 +1470,17 @@ export default function Feed() {
     if (!program || !publicKey) return;
     setLoadingOnchain(true);
     try {
-      const [allMapped, profiles, comments, reactions, polls] = await Promise.all([
+      const [allMapped, profiles, comments, reactions, polls, myLikedPosts] = await Promise.all([
         program.getAllPosts(),
         program.getAllProfiles(),
         program.getAllComments(),
         program.getAllReactions(),
         program.getAllPolls(),
+        program.getLikedPostsByUser(publicKey),
       ]);
+
+      // Seed the liked posts store from on-chain data (catches cross-device likes e.g. from mobile)
+      useAppStore.getState().setLikedPosts(myLikedPosts);
 
       setAllComments(comments);
       setAllReactions(reactions);
@@ -1273,6 +1518,25 @@ export default function Feed() {
     fetchOnchainPosts();
   }, [program, publicKey]);
 
+  // Fetch trending Kickstart launches for inline feed cards (refresh every 2 min)
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch("/api/kickstart/trending");
+        const data = await res.json();
+        if (!cancelled && data?.success && Array.isArray(data.response)) {
+          setTrendingTokens(data.response);
+        }
+      } catch (err) {
+        console.warn("trending tokens fetch failed:", err);
+      }
+    };
+    load();
+    const interval = setInterval(load, 120_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
   // Auto-refresh feed every 30s — posts (like counts), comments, reactions
   useEffect(() => {
     if (!program || !publicKey) return;
@@ -1305,7 +1569,57 @@ export default function Feed() {
   // Legacy alias for components that call refreshInteractions
   const refreshInteractions = refreshFeed;
 
+  // Publish a thread: each segment becomes its own on-chain post, tagged with a
+  // shared rootId + position so they group together on render. Posts are created
+  // sequentially (each is a separate tx).
+  const handlePostThread = async () => {
+    if (posting) return;
+    const segments = [newPost, ...threadSegments].map((s) => s.trim()).filter(Boolean);
+    if (segments.length < 2) {
+      toast("error", "Thread needs 2+ posts", "Add at least one more post, or turn off thread mode");
+      return;
+    }
+    if (!program || !publicKey) {
+      toast("error", "Wallet not connected", "Please connect your wallet to post");
+      return;
+    }
+
+    setPosting(true);
+    try {
+      const profile = await program.getProfile(publicKey);
+      if (!profile) throw new Error("You need to create a profile first. Go to the Profile tab to set up your account.");
+
+      const rootId = Date.now();
+      const total = segments.length;
+      for (let i = 0; i < total; i++) {
+        toast("privacy", `Posting thread ${i + 1}/${total}...`, "Publishing to Solana");
+        const content = `THREAD|${rootId}|${i}|${total}|${segments[i]}`;
+        // Unique, ordered postId per segment.
+        await program.createPost(rootId + i, content, false);
+      }
+      toast("success", `Thread published! 🧵 ${total} posts`, "Live on Solana");
+      setNewPost("");
+      setThreadSegments([]);
+      setThreadMode(false);
+      setTimeout(() => fetchOnchainPosts(), 1500);
+    } catch (err: any) {
+      const msg = err?.message?.slice(0, 150) || "Unknown error";
+      if (msg.includes("User rejected") || msg.includes("rejected the request")) {
+        toast("error", "Thread cancelled", "You rejected a transaction");
+      } else if (msg.includes("need to create a profile")) {
+        toast("error", "Profile required", msg);
+      } else if (msg.toLowerCase().includes("insufficient")) {
+        toast("error", "Insufficient SOL", "Fund your wallet from the Profile tab and try again.");
+      } else {
+        toast("error", "Thread post failed", msg);
+      }
+    } finally {
+      setPosting(false);
+    }
+  };
+
   const handlePost = async () => {
+    if (threadMode) { await handlePostThread(); return; }
     if ((!newPost.trim() && !mediaFile) || posting) return;
     if (!program || !publicKey) {
       toast("error", "Wallet not connected", "Please connect your wallet to post");
@@ -1437,7 +1751,7 @@ export default function Feed() {
             {(() => {
               const myAvatar = (publicKey && profileMap[publicKey.toBase58()]?.avatarUrl) || currentUser?.avatarUrl;
               const myName = (publicKey && profileMap[publicKey.toBase58()]?.displayName) || currentUser?.displayName;
-              if (myAvatar) return <img src={myAvatar} alt="" className="w-10 h-10 rounded-full object-cover border-2 border-white shadow-sm flex-shrink-0" />;
+              if (myAvatar) return <img src={myAvatar} onError={handleIpfsImgError} alt="" className="w-10 h-10 rounded-full object-cover border-2 border-white shadow-sm flex-shrink-0" />;
               if (myName) return <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#EBF4FF] to-[#DBEAFE] flex items-center justify-center text-lg font-bold text-[#2563EB] flex-shrink-0">{myName.charAt(0).toUpperCase()}</div>;
               return <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#EBF4FF] to-[#DBEAFE] animate-pulse flex-shrink-0" />;
             })()}
@@ -1467,6 +1781,38 @@ export default function Feed() {
               )}
             </div>
           </div>
+          {/* Thread segments (posts 2..N) */}
+          {threadMode && (
+            <div className="mt-1 space-y-2">
+              {threadSegments.map((seg, i) => (
+                <div key={i} className="flex items-start gap-2 pl-3 border-l-2 border-[#2563EB]/25">
+                  <span className="mt-2.5 text-[10px] font-bold text-[#94A3B8] w-8 flex-shrink-0 tabular-nums">{i + 2}/{threadSegments.length + 1}</span>
+                  <textarea
+                    value={seg}
+                    onChange={(e) => { const next = [...threadSegments]; next[i] = e.target.value; setThreadSegments(next); }}
+                    maxLength={200}
+                    placeholder="Add to thread…"
+                    className="flex-1 resize-none bg-transparent text-[15px] focus:outline-none placeholder:text-[#94A3B8] min-h-[44px] leading-relaxed"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setThreadSegments(threadSegments.filter((_, j) => j !== i))}
+                    className="mt-2 text-[#94A3B8] hover:text-red-400 transition-colors"
+                    title="Remove post"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() => setThreadSegments([...threadSegments, ""])}
+                className="flex items-center gap-1.5 text-xs font-semibold text-[#2563EB] hover:text-[#1D4ED8] transition-colors pl-3"
+              >
+                <Plus className="w-3.5 h-3.5" /> Add another post
+              </button>
+            </div>
+          )}
           {newPost.length > 160 && (
             <div className="flex justify-end mt-1">
               <div className={`w-7 h-7 rounded-full border-2 flex items-center justify-center text-[10px] font-bold ${
@@ -1609,20 +1955,42 @@ export default function Feed() {
               >
                 <BarChart3 className="w-3.5 h-3.5" />
               </button>
+              {/* Thread toggle */}
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !threadMode;
+                  setThreadMode(next);
+                  if (next) { setIsPaidPost(false); setIsPollMode(false); if (threadSegments.length === 0) setThreadSegments([""]); }
+                }}
+                className={`touch-active flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                  threadMode
+                    ? "text-[#2563EB] bg-[#EFF6FF] border border-[#BFDBFE]"
+                    : "text-[#94A3B8] hover:text-[#2563EB] hover:bg-[#EFF6FF]"
+                }`}
+                title={threadMode ? "Turn off thread" : "Create a thread"}
+              >
+                <ListPlus className="w-3.5 h-3.5" />
+              </button>
             </div>
             {uploading && (
               <span className="text-xs text-[#2563EB] animate-pulse">Uploading...</span>
             )}
             <button
               onClick={handlePost}
-              disabled={(!newPost.trim() && !mediaFile) || posting}
+              disabled={
+                posting ||
+                (threadMode
+                  ? !(newPost.trim() && [newPost, ...threadSegments].map((s) => s.trim()).filter(Boolean).length >= 2)
+                  : (!newPost.trim() && !mediaFile))
+              }
               className={`touch-active px-5 py-2 text-white text-[15px] font-bold rounded-full disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-sm ${
                 isPaidPost
                   ? "bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 shadow-amber-200"
                   : "bg-[#2563EB] hover:bg-[#1D4ED8] shadow-blue-200"
               }`}
             >
-              {posting ? "Posting..." : isPaidPost ? `Post · ${paidPrice} SOL` : "Post"}
+              {posting ? "Posting..." : threadMode ? `Post thread 🧵 ${[newPost, ...threadSegments].map((s) => s.trim()).filter(Boolean).length}` : isPaidPost ? `Post · ${paidPrice} SOL` : "Post"}
             </button>
           </div>
         </div>
@@ -1642,6 +2010,9 @@ export default function Feed() {
       {/* On-chain public posts from all users */}
       {isConnected && (
         <div className="mt-2">
+          {/* Pinned featured token — spotlighted at the top of the feed */}
+          <FeaturedToken />
+
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
               <Globe className="w-4 h-4 text-[#2563EB]" />
@@ -1666,16 +2037,67 @@ export default function Feed() {
           {/* Merge posts and polls into a single timeline sorted by createdAt */}
           {(() => {
             const feedItems: { type: "post" | "poll"; data: any; createdAt: number }[] = [
-              ...onchainPosts.map(p => ({ type: "post" as const, data: p, createdAt: Number(p.createdAt) })),
-              ...allPolls.map(p => ({ type: "poll" as const, data: p, createdAt: p.createdAt })),
+              // posts: createdAt is unix seconds on-chain → convert to ms
+              ...onchainPosts.map(p => ({ type: "post" as const, data: p, createdAt: Number(p.createdAt) * 1000 })),
+              // polls: createdAt already converted to ms in getAllPolls()
+              ...allPolls.map(p => ({ type: "poll" as const, data: p, createdAt: Number(p.createdAt) })),
             ].sort((a, b) => b.createdAt - a.createdAt);
 
-            return feedItems.map((item) => {
+            // Inject one trending token card after every TOKEN_INJECT_EVERY items.
+            // Walk tokens in order (already sorted by 24h volume server-side) so
+            // every render shows the same sequence and we don't repeat the same token.
+            const TOKEN_INJECT_EVERY = 6;
+            const rendered: ReactElement[] = [];
+            let tokenCursor = 0;
+
+            // ── Thread grouping: posts sharing a THREAD rootId render as one unit ──
+            const threadGroups = new Map<string, { post: any; index: number; total: number; actualContent: string }[]>();
+            for (const it of feedItems) {
+              if (it.type !== "post") continue;
+              const ti = parseThreadPost(it.data.content);
+              if (ti.isThread) {
+                const arr = threadGroups.get(ti.rootId) || [];
+                arr.push({ post: it.data, index: ti.index, total: ti.total, actualContent: ti.actualContent });
+                threadGroups.set(ti.rootId, arr);
+              }
+            }
+            threadGroups.forEach((arr) => arr.sort((a, b) => a.index - b.index));
+            const renderedThreadRoots = new Set<string>();
+
+            // Shared post card (used by both normal and threaded posts).
+            const makePostCard = (p: any, profile: any, isMe: boolean) => (
+              <OnChainPostCard
+                post={p}
+                profile={profile}
+                isMe={isMe}
+                program={program}
+                allComments={allComments}
+                allReactions={allReactions}
+                profileMap={profileMap}
+                onCommentAdded={refreshInteractions}
+                onReactionAdded={refreshInteractions}
+                defaultShowComments={focusPostKey === p.publicKey}
+                onRepost={async (content: string) => {
+                  if (!program || !publicKey) return;
+                  const postId = Date.now();
+                  try {
+                    await program.createPost(postId, content, false);
+                    toast("success", "Repost published! 🔁", "On-chain");
+                    setTimeout(() => fetchOnchainPosts(), 1500);
+                  } catch (err: any) {
+                    toast("error", "Repost failed", err?.message?.slice(0, 80) || "Try again");
+                  }
+                }}
+                onDelete={() => { setTimeout(() => fetchOnchainPosts(), 1500); }}
+              />
+            );
+
+            feedItems.forEach((item, idx) => {
               if (item.type === "poll") {
                 const poll = item.data;
                 const profile = profileMap[poll.creator];
                 const isMe = publicKey ? poll.creator === publicKey.toBase58() : false;
-                return (
+                rendered.push(
                   <PollCard
                     key={`poll-${poll.pubkey}`}
                     poll={poll}
@@ -1688,42 +2110,85 @@ export default function Feed() {
                     }}
                   />
                 );
+              } else {
+                const post = item.data;
+                const profile = profileMap[post.author];
+                const isMe = publicKey ? post.author === publicKey.toBase58() : false;
+                const ti = parseThreadPost(post.content);
+
+                if (ti.isThread) {
+                  // Render the entire thread once, at its first-seen member's slot.
+                  if (renderedThreadRoots.has(ti.rootId)) return;
+                  renderedThreadRoots.add(ti.rootId);
+                  const members = threadGroups.get(ti.rootId) || [];
+                  rendered.push(
+                    <div key={`thread-${ti.rootId}`} id={`post-${post.publicKey}`}>
+                      <ThreadGroup
+                        members={members}
+                        renderMember={(m) => makePostCard({ ...m.post, content: m.actualContent }, profile, isMe)}
+                      />
+                    </div>
+                  );
+                } else {
+                  rendered.push(
+                    <div key={post.publicKey} id={`post-${post.publicKey}`} className="transition-all duration-300 rounded-2xl">
+                      {makePostCard(post, profile, isMe)}
+                    </div>
+                  );
+                }
               }
-              const post = item.data;
-              const profile = profileMap[post.author];
-              const isMe = publicKey ? post.author === publicKey.toBase58() : false;
-              return (
-                <div key={post.publicKey} id={`post-${post.publicKey}`} className="transition-all duration-300 rounded-2xl">
-                <OnChainPostCard
-                  post={post}
-                  profile={profile}
-                  isMe={isMe}
-                  program={program}
-                  allComments={allComments}
-                  allReactions={allReactions}
-                  profileMap={profileMap}
-                  onCommentAdded={refreshInteractions}
-                  onReactionAdded={refreshInteractions}
-                  defaultShowComments={focusPostKey === post.publicKey}
-                  onRepost={async (content: string) => {
-                    if (!program || !publicKey) return;
-                    const postId = Date.now();
-                    try {
-                      await program.createPost(postId, content, false);
-                      toast("success", "Repost published! 🔁", "On-chain");
-                      setTimeout(() => fetchOnchainPosts(), 1500);
-                    } catch (err: any) {
-                      toast("error", "Repost failed", err?.message?.slice(0, 80) || "Try again");
-                    }
-                  }}
-                  onDelete={() => {
-                    setTimeout(() => fetchOnchainPosts(), 1500);
-                  }}
-                />
-                </div>
-              );
+
+              // After every Nth item, inject a trending token card (if we have tokens left)
+              const isInjectionPoint = (idx + 1) % TOKEN_INJECT_EVERY === 0 && idx !== feedItems.length - 1;
+              if (isInjectionPoint && trendingTokens.length > 0) {
+                const token = trendingTokens[tokenCursor % trendingTokens.length];
+                tokenCursor++;
+                rendered.push(
+                  <TrendingTokenCard
+                    key={`trend-${token.tokenMint}-${idx}`}
+                    token={token}
+                    onTrade={(picked) => setSelectedTrendingToken(picked)}
+                  />
+                );
+              }
             });
+
+            return rendered;
           })()}
+        </div>
+      )}
+
+      {selectedTrendingToken && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[85vh] overflow-y-auto">
+            <div className="p-5 border-b border-[#E2E8F0]">
+              <div className="flex items-center gap-3">
+                {selectedTrendingToken.image ? (
+                  <img src={selectedTrendingToken.image} alt="" className="w-12 h-12 rounded-full object-cover" />
+                ) : (
+                  <div className="w-12 h-12 rounded-full bg-gradient-to-br from-[#2563EB] to-[#7C3AED] flex items-center justify-center">
+                    <span className="text-lg font-bold text-white">{selectedTrendingToken.symbol?.[0] || "?"}</span>
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-lg font-bold text-[#1A1A2E] truncate">{selectedTrendingToken.name}</h2>
+                  <span className="text-sm text-[#64748B]">${selectedTrendingToken.symbol}</span>
+                </div>
+                <button onClick={() => setSelectedTrendingToken(null)} className="p-2 hover:bg-[#F1F5F9] rounded-lg">✕</button>
+              </div>
+              {selectedTrendingToken.description && (
+                <p className="text-xs text-[#64748B] mt-2">{selectedTrendingToken.description}</p>
+              )}
+            </div>
+            <div className="p-4">
+              <TokenTrade
+                tokenMint={selectedTrendingToken.tokenMint}
+                tokenSymbol={selectedTrendingToken.symbol}
+                tokenImage={selectedTrendingToken.image}
+                compact
+              />
+            </div>
+          </div>
         </div>
       )}
     </div>

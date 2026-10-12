@@ -1,10 +1,12 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { TrendingUp, Heart, MessageCircle, Flame, Users, Hash } from "lucide-react";
+import { TrendingUp, Heart, MessageCircle, Flame, Users } from "lucide-react";
 import { useProgram } from "@/hooks/useProgram";
 import { useWallet } from "@/hooks/usePrivyWallet";
 import ProfileHoverCard from "@/components/ProfileHoverCard";
+import { handleIpfsImgError } from "@/components/RichContent";
+import { useAppStore } from "@/lib/store";
 
 /** Parse paid post prefix */
 function parsePaidContent(content: string): string {
@@ -41,6 +43,7 @@ interface TrendingPost {
 export default function TrendingSidebar() {
   const program = useProgram();
   const { publicKey } = useWallet();
+  const { navigateToProfile } = useAppStore();
   const [trending, setTrending] = useState<TrendingPost[]>([]);
   const [topCreators, setTopCreators] = useState<any[]>([]);
   const [stats, setStats] = useState({ posts: 0, users: 0, polls: 0 });
@@ -205,11 +208,15 @@ export default function TrendingSidebar() {
                 key={creator.owner}
                 walletAddress={creator.owner}
                 profile={creator}
+                wrapperClassName="block w-full"
               >
-                <div className="px-4 py-2.5 hover:bg-[#F8FAFC] transition-colors cursor-pointer">
+                <div
+                  onClick={() => navigateToProfile(creator.owner)}
+                  className="px-4 py-2.5 hover:bg-[#F8FAFC] transition-colors cursor-pointer"
+                >
                   <div className="flex items-center gap-2.5">
                     {creator.avatarUrl ? (
-                      <img src={creator.avatarUrl} alt="" className="w-8 h-8 rounded-full object-cover flex-shrink-0" />
+                      <img src={creator.avatarUrl} onError={handleIpfsImgError} alt="" className="w-8 h-8 rounded-full object-cover flex-shrink-0" />
                     ) : (
                       <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#EBF4FF] to-[#DBEAFE] flex items-center justify-center text-xs font-bold text-[#2563EB] flex-shrink-0">
                         {(creator.displayName || creator.username || "?").charAt(0).toUpperCase()}
@@ -233,28 +240,6 @@ export default function TrendingSidebar() {
           </div>
         </div>
       )}
-
-      {/* Platform Stats */}
-      <div className="bg-white rounded-2xl border border-[#E2E8F0] px-4 py-3">
-        <div className="flex items-center gap-2 mb-3">
-          <Hash className="w-4 h-4 text-[#16A34A]" />
-          <span className="text-sm font-bold text-[#1A1A2E]">Shyft Stats</span>
-        </div>
-        <div className="grid grid-cols-3 gap-2">
-          <div className="text-center">
-            <p className="text-lg font-bold text-[#1A1A2E]">{stats.posts}</p>
-            <p className="text-[10px] text-[#94A3B8]">Posts</p>
-          </div>
-          <div className="text-center">
-            <p className="text-lg font-bold text-[#1A1A2E]">{stats.users}</p>
-            <p className="text-[10px] text-[#94A3B8]">Users</p>
-          </div>
-          <div className="text-center">
-            <p className="text-lg font-bold text-[#1A1A2E]">{stats.polls}</p>
-            <p className="text-[10px] text-[#94A3B8]">Polls</p>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }

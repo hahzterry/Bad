@@ -17,8 +17,12 @@ const PROGRAM_ID = new PublicKey("EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ")
 // ========== IPFS URL Helpers ==========
 // On-chain fields are limited to 128 bytes. Full IPFS URLs can be 130+ chars.
 // We store only the CID on-chain and reconstruct the full URL client-side.
-const IPFS_GATEWAY = "gateway.pinata.cloud";
-const IPFS_CID_REGEX = /\/ipfs\/([a-zA-Z0-9]+)(?:\/[^?#]*)?(\?.*)?$/;
+// Use the dedicated Pinata gateway (paid, no shared rate limits). The shared
+// gateway.pinata.cloud is aggressively rate-limited (429s) so media fails to
+// load for some users under load.
+const IPFS_GATEWAY =
+  process.env.NEXT_PUBLIC_PINATA_GATEWAY || "amethyst-secondary-orca-737.mypinata.cloud";
+const IPFS_CID_REGEX = /\/ipfs\/([a-zA-Z0-9]+)(\/[^?#]*)?(\?.*)?$/;
 
 /** Strip a full IPFS URL down to just the CID (for on-chain storage). */
 function compressIpfsUrl(url: string): string {
@@ -31,11 +35,13 @@ function compressIpfsUrl(url: string): string {
 /** Expand a bare CID back to a full IPFS gateway URL. */
 function expandIpfsUrl(stored: string): string {
   if (!stored) return stored;
-  // Already a full URL — rewrite private/dedicated Pinata gateways to public
+  // Already a full URL — rewrite all gateways to ipfs.io
   if (stored.startsWith("http")) {
     const cidMatch = stored.match(IPFS_CID_REGEX);
-    if (cidMatch && !stored.includes(IPFS_GATEWAY)) {
-      return `https://${IPFS_GATEWAY}/ipfs/${cidMatch[1]}`;
+    if (cidMatch) {
+      const cid = cidMatch[1];
+      const path = cidMatch[2] || "";
+      return `https://${IPFS_GATEWAY}/ipfs/${cid}${path}`;
     }
     return stored;
   }
@@ -48,6 +54,8 @@ function expandIpfsUrl(stored: string): string {
 
 const PROFILE_SEED = Buffer.from("profile");
 const POST_SEED = Buffer.from("post");
+const USERNAME_SEED = Buffer.from("username");
+const LISTING_SEED = Buffer.from("listing");
 const CHAT_SEED = Buffer.from("chat");
 const MESSAGE_SEED = Buffer.from("message");
 const FOLLOW_SEED = Buffer.from("follow");
@@ -140,31 +148,135 @@ export async function requestServerTx(
   connection: Connection
 ): Promise<string> {
   const walletAddress = wallet.publicKey.toBase58();
-  console.log(`📋 build-tx: action="${action}" wallet=${walletAddress.slice(0, 8)}..`);
+  if (BATCHABLE_ACTIONS.has(action)) {
+    return enqueueBatchedSocialTx(action, params, walletAddress, wallet, connection);
+  }
+  return buildSignAndSendTx({ action, params, walletAddress }, wallet, connection, action);
+}
 
-  // Step 1: Ask server to build + treasury-sign the tx
+const BATCHABLE_ACTIONS = new Set(["likePost", "reactToPost", "followUser", "unfollowUser"]);
+const SOCIAL_BATCH_WINDOW_MS = 600;
+const SOCIAL_BATCH_MAX_ACTIONS = 4;
+
+type PendingSocialItem = {
+  action: string;
+  params: Record<string, any>;
+  resolve: (signature: string) => void;
+  reject: (error: Error) => void;
+};
+
+type PendingSocialBatch = {
+  walletAddress: string;
+  wallet: { signTransaction(tx: Transaction): Promise<Transaction>; publicKey: PublicKey };
+  connection: Connection;
+  items: PendingSocialItem[];
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+const pendingSocialBatches = new Map<string, PendingSocialBatch>();
+
+async function buildSignAndSendTx(
+  payload: Record<string, any>,
+  wallet: { signTransaction(tx: Transaction): Promise<Transaction>; publicKey: PublicKey },
+  connection: Connection,
+  debugLabel: string
+): Promise<string> {
+  const walletAddress = wallet.publicKey.toBase58();
+  console.log(`📋 build-tx: action="${debugLabel}" wallet=${walletAddress.slice(0, 8)}..`);
+
   const res = await fetch("/api/build-tx", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action, params, walletAddress }),
+    body: JSON.stringify(payload),
   });
   const data = await res.json();
   if (!data.success) {
-    console.error(`❌ build-tx failed for "${action}":`, data.error);
+    console.error(`❌ build-tx failed for "${debugLabel}":`, data.error);
     throw new Error(data.error || "Build transaction failed");
   }
 
-  // Step 2: Deserialize the treasury-signed tx
   const treasurySigned = Transaction.from(Buffer.from(data.transaction, "base64"));
-
-  // Step 3: User co-signs (wallet popup)
   const fullySigned = await wallet.signTransaction(treasurySigned);
-
-  // Step 4: Send directly to Solana
   const sig = await connection.sendRawTransaction(fullySigned.serialize());
-  console.log(`✅ "${action}" sent to Solana:`, sig.slice(0, 16) + "...");
-
+  console.log(`✅ "${debugLabel}" sent to Solana:`, sig.slice(0, 16) + "...");
   return sig;
+}
+
+function enqueueBatchedSocialTx(
+  action: string,
+  params: Record<string, any>,
+  walletAddress: string,
+  wallet: { signTransaction(tx: Transaction): Promise<Transaction>; publicKey: PublicKey },
+  connection: Connection
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let batch = pendingSocialBatches.get(walletAddress);
+    if (!batch) {
+      batch = {
+        walletAddress,
+        wallet,
+        connection,
+        items: [],
+        timer: null,
+      };
+      pendingSocialBatches.set(walletAddress, batch);
+    }
+
+    batch.items.push({ action, params, resolve, reject });
+
+    if (batch.items.length >= SOCIAL_BATCH_MAX_ACTIONS) {
+      if (batch.timer) {
+        clearTimeout(batch.timer);
+        batch.timer = null;
+      }
+      void flushBatchedSocialTx(walletAddress);
+      return;
+    }
+
+    if (!batch.timer) {
+      batch.timer = setTimeout(() => {
+        void flushBatchedSocialTx(walletAddress);
+      }, SOCIAL_BATCH_WINDOW_MS);
+    }
+  });
+}
+
+async function flushBatchedSocialTx(walletAddress: string): Promise<void> {
+  const batch = pendingSocialBatches.get(walletAddress);
+  if (!batch) return;
+
+  pendingSocialBatches.delete(walletAddress);
+  if (batch.timer) {
+    clearTimeout(batch.timer);
+    batch.timer = null;
+  }
+
+  const items = batch.items;
+  if (items.length === 0) return;
+
+  try {
+    const signature = items.length === 1
+      ? await buildSignAndSendTx(
+          { action: items[0].action, params: items[0].params, walletAddress },
+          batch.wallet,
+          batch.connection,
+          items[0].action
+        )
+      : await buildSignAndSendTx(
+          {
+            walletAddress,
+            actions: items.map((item) => ({ action: item.action, params: item.params })),
+          },
+          batch.wallet,
+          batch.connection,
+          `batch:${items.map((item) => item.action).join(",")}`
+        );
+
+    for (const item of items) item.resolve(signature);
+  } catch (err: any) {
+    const error = err instanceof Error ? err : new Error(err?.message || "Batched transaction failed");
+    for (const item of items) item.reject(error);
+  }
 }
 
 // ========== Helpers ==========
@@ -191,6 +303,12 @@ function toBEBytes(num: number): Uint8Array {
 
 function getProfilePda(owner: PublicKey): [PublicKey, number] {
   return PublicKey.findProgramAddressSync([PROFILE_SEED, owner.toBuffer()], PROGRAM_ID);
+}
+function getUsernamePda(name: string): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([USERNAME_SEED, Buffer.from(name)], PROGRAM_ID);
+}
+function getListingPda(name: string): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync([LISTING_SEED, Buffer.from(name)], PROGRAM_ID);
 }
 
 function getPostPda(author: PublicKey, postId: number): [PublicKey, number] {
@@ -273,14 +391,92 @@ export class ShyftClient {
       // ignore — account may not exist yet
     }
 
-    // Server builds tx, treasury signs, user co-signs + sends to Solana
-    const sig = await requestServerTx("createProfile", { username, displayName, bio }, this.provider.wallet, this.provider.connection);
+    // Two on-chain steps (the program no longer lets create_profile set a name
+    // directly — that was the impersonation hole). First create the profile
+    // nameless, then claim the username through the registry, which enforces
+    // uniqueness. Callers pass the username exactly as before; this hides the
+    // split.
+    const sig = await requestServerTx("createProfile", { displayName, bio }, this.provider.wallet, this.provider.connection);
+    if (username && username.trim()) {
+      // CRITICAL: requestServerTx returns after SENDING, not confirming. The
+      // claim needs the profile account to already exist on-chain, so wait for
+      // it to actually land before claiming — otherwise the claim races the
+      // creation and fails with AccountNotInitialized.
+      const [profilePda2] = getProfilePda(user);
+      let exists = false;
+      for (let i = 0; i < 30; i++) {
+        const info = await this.provider.connection.getAccountInfo(profilePda2, "confirmed");
+        if (info) { exists = true; break; }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      if (!exists) throw new Error("Profile is still confirming — try claiming your name again in a moment.");
+      try {
+        await this.claimUsername(username.trim());
+      } catch (e: any) {
+        // Profile exists but the name didn't stick (e.g. taken in the moment).
+        // Surface it so the user can pick another — they aren't blocked from
+        // claiming later.
+        throw new Error(`Profile created, but @${username.trim()} could not be claimed: ${e?.message || e}. Pick another name.`);
+      }
+    }
     return sig;
   }
 
   async migrateProfile(): Promise<string> {
     const sig = await requestServerTx("migrateProfile", {}, this.provider.wallet, this.provider.connection);
     return sig;
+  }
+
+  // ── USERNAMES / MARKETPLACE ──
+
+  /** Claim a fresh username (registry-enforced uniqueness). Also displays it. */
+  async claimUsername(name: string): Promise<string> {
+    const lower = name.trim().toLowerCase().replace(/[^a-z0-9_]/g,"");
+    const reserved = checkUsername(lower);
+    if (reserved.blocked) throw new Error(reserved.reason || "This username is reserved");
+    return requestServerTx("claimUsername", { name: lower }, this.provider.wallet, this.provider.connection);
+  }
+
+  /** Switch your displayed name to another one you own. */
+  async setDisplayUsername(name: string): Promise<string> {
+    return requestServerTx("setDisplayUsername", { name: name.trim().toLowerCase().replace(/[^a-z0-9_]/g,"") }, this.provider.wallet, this.provider.connection);
+  }
+
+  /** List a name for sale. `price` is whole $SHYFT (converted to 6-dp base units). */
+  async listUsername(name: string, priceShyft: number): Promise<string> {
+    const base = Math.round(priceShyft * 1_000_000).toString();
+    return requestServerTx("listUsername", { name: name.trim().toLowerCase().replace(/[^a-z0-9_]/g,""), price: base }, this.provider.wallet, this.provider.connection);
+  }
+
+  async updatePrice(name: string, priceShyft: number): Promise<string> {
+    const base = Math.round(priceShyft * 1_000_000).toString();
+    return requestServerTx("updatePrice", { name: name.trim().toLowerCase().replace(/[^a-z0-9_]/g,""), price: base }, this.provider.wallet, this.provider.connection);
+  }
+
+  async delistUsername(name: string): Promise<string> {
+    return requestServerTx("delistUsername", { name: name.trim().toLowerCase().replace(/[^a-z0-9_]/g,"") }, this.provider.wallet, this.provider.connection);
+  }
+
+  async buyUsername(name: string): Promise<string> {
+    return requestServerTx("buyUsername", { name: name.trim().toLowerCase().replace(/[^a-z0-9_]/g,"") }, this.provider.wallet, this.provider.connection);
+  }
+
+  /** Fetch a username record (owner, transfer count) or null if unclaimed. */
+  async getUsernameRecord(name: string): Promise<any | null> {
+    const [pda] = getUsernamePda(name.trim().toLowerCase().replace(/[^a-z0-9_]/g,""));
+    try { return await (this.program.account as any).usernameRecord.fetch(pda); }
+    catch { return null; }
+  }
+
+  /** All open marketplace listings. */
+  async getListings(): Promise<{ name: string; seller: string; priceShyft: number; createdAt: number }[]> {
+    const all = await (this.program.account as any).listing.all();
+    return all.map((l: any) => ({
+      name: l.account.name,
+      seller: l.account.seller.toBase58(),
+      priceShyft: Number(l.account.price) / 1_000_000,
+      createdAt: Number(l.account.createdAt),
+    }));
   }
 
   async getProfile(owner: PublicKey): Promise<any> {
@@ -326,14 +522,14 @@ export class ShyftClient {
     );
   }
 
-  async updateProfile(displayName: string, bio: string, avatarUrl: string, bannerUrl: string): Promise<string> {
+  async updateProfile(displayName: string, bio: string, avatarUrl: string, bannerUrl: string, websiteUrl: string = ""): Promise<string> {
     const user = this.provider.wallet.publicKey;
     const [profilePda] = getProfilePda(user);
 
-    // Auto-migrate profile if account is undersized (e.g. avatar/banner fields grew)
+    // Auto-migrate profile if account is undersized (e.g. new fields added)
     try {
       const acctInfo = await this.provider.connection.getAccountInfo(profilePda);
-      const expectedSize = 8 + 32 + (4+16) + (4+24) + (4+64) + 1 + 4 + 4 + 4 + 2 + 8 + (4+128) + (4+128); // 8 + Profile::LEN
+      const expectedSize = 8 + 32 + (4+16) + (4+24) + (4+64) + 1 + 4 + 4 + 4 + 2 + 8 + (4+128) + (4+128) + (4+64); // 8 + Profile::LEN
       if (acctInfo && acctInfo.data.length < expectedSize) {
         console.log(`Profile account undersized (${acctInfo.data.length} < ${expectedSize}), migrating...`);
         await this.migrateProfile();
@@ -346,8 +542,8 @@ export class ShyftClient {
     const compressedAvatar = compressIpfsUrl(avatarUrl);
     const compressedBanner = compressIpfsUrl(bannerUrl);
 
-    const sig = await requestServerTx("updateProfile", { displayName, bio, avatarUrl: compressedAvatar, bannerUrl: compressedBanner }, this.provider.wallet, this.provider.connection);
-    
+    const sig = await requestServerTx("updateProfile", { displayName, bio, avatarUrl: compressedAvatar, bannerUrl: compressedBanner, websiteUrl }, this.provider.wallet, this.provider.connection);
+
     rpcCache.invalidate("profile_" + user.toBase58());
     return sig;
   }
@@ -382,6 +578,19 @@ export class ShyftClient {
       return await this.accounts.post.fetch(postPda);
     } catch {
       return null;
+    }
+  }
+
+  async editPost(postId: number, content: string): Promise<string> {
+    const wallet = this.provider.wallet.publicKey;
+    if (!wallet) throw new Error("Wallet not connected");
+    try {
+      const sig = await requestServerTx("editPost", { postId, content }, this.provider.wallet, this.provider.connection);
+      rpcCache.invalidate("allPosts");
+      return sig;
+    } catch (err: any) {
+      console.error("Edit post error:", err);
+      throw err;
     }
   }
 
@@ -498,10 +707,28 @@ export class ShyftClient {
 
   async likePost(author: PublicKey, postId: number): Promise<string> {
     const sig = await requestServerTx("likePost", { author: author.toBase58(), postId }, this.provider.wallet, this.provider.connection);
+    rpcCache.invalidate("allReactions");
+    const userWallet = this.provider.wallet.publicKey;
+    if (userWallet) rpcCache.invalidate(`likedBy_${userWallet.toBase58()}`);
     return sig;
   }
 
-  // ========== COMMENTS ==========
+  async getLikedPostsByUser(userWallet: PublicKey): Promise<string[]> {
+    const cacheKey = `likedBy_${userWallet.toBase58()}`;
+    const cached = rpcCache.get<string[]>(cacheKey);
+    if (cached) return cached;
+    try {
+      const all = await this.accounts.likeRecord.all([
+        { memcmp: { offset: 8 + 32, bytes: userWallet.toBase58() } }
+      ]);
+      const result = all.map((r: any) => r.account.post.toBase58());
+      rpcCache.set(cacheKey, result);
+      return result;
+    } catch (err) {
+      console.error("getLikedPostsByUser error:", err);
+      return [];
+    }
+  }
 
   async createComment(author: PublicKey, postId: number, commentIndex: number, content: string): Promise<string> {
     const sig = await requestServerTx("createComment", { author: author.toBase58(), postId, commentIndex, content }, this.provider.wallet, this.provider.connection);
@@ -594,6 +821,44 @@ export class ShyftClient {
   async createChat(chatId: number, user2: PublicKey): Promise<string> {
     const sig = await requestServerTx("createChat", { chatId, user2: user2.toBase58() }, this.provider.wallet, this.provider.connection);
     return sig;
+  }
+
+  /**
+   * Make an existing chat PRIVATE (MagicBlock TEE) — base-layer legs only.
+   * Runs fund_chat_permission then delegate_chat_private (both treasury-sponsored).
+   * After this confirms, call initChatPermission() (see src/lib/privateChat.ts)
+   * to lock read/write to the two members on the ER.
+   */
+  async enablePrivateInbox(chatId: number): Promise<{ createSig: string; delegateSig: string }> {
+    const createSig = await requestServerTx("createPrivateInbox", { chatId }, this.provider.wallet, this.provider.connection);
+    const delegateSig = await requestServerTx("delegatePrivateInbox", { chatId }, this.provider.wallet, this.provider.connection);
+    return { createSig, delegateSig };
+  }
+
+  /** Bring a private inbox's state back to Solana (treasury-sponsored). */
+  async undelegatePrivateInbox(chatId: number): Promise<string> {
+    return requestServerTx("undelegatePrivateInbox", { chatId }, this.provider.wallet, this.provider.connection);
+  }
+
+  /**
+   * Delete a private (MagicBlock TEE) chat and refund its rent to the treasury.
+   * Two steps: undelegate (ER-side, member-signed) → wait for base-layer return →
+   * close (treasury-sponsored). Pass teeSign (wallet.signMessage) for the TEE auth.
+   */
+  async deletePrivateChat(
+    chatId: number,
+    teeSign: (m: Uint8Array) => Promise<Uint8Array>,
+    onStep?: (s: string) => void
+  ): Promise<{ closeSig: string }> {
+    const { undelegateInbox, waitForUndelegation } = await import("@/lib/privateChat");
+    onStep?.("Undelegating from the TEE…");
+    await undelegateInbox(chatId, this.provider.wallet as any, teeSign);
+    onStep?.("Returning to Solana…");
+    const back = await waitForUndelegation(chatId, this.provider.connection);
+    if (!back) throw new Error("Undelegation didn't land in time — try delete again in a moment");
+    onStep?.("Closing & refunding rent…");
+    const closeSig = await requestServerTx("closePrivateInbox", { chatId }, this.provider.wallet, this.provider.connection);
+    return { closeSig };
   }
 
   async sendMessage(
@@ -882,26 +1147,34 @@ export class ShyftClient {
    */
   private _peerKeyCache = new Map<string, Uint8Array>();
 
-  async findPeerEncryptionKey(chatId: number, myAddress: string): Promise<Uint8Array | null> {
-    // Return cached result if we already found the peer key for this chat
-    const cacheKey = `${chatId}:${myAddress}`;
-    const cached = this._peerKeyCache.get(cacheKey);
-    if (cached) return cached;
+  /** Clear cached peer key for a chat — forces next findPeerEncryptionKey to re-scan */
+  clearPeerKeyCache(chatId: number, myAddress: string): void {
+    this._peerKeyCache.delete(`${chatId}:${myAddress}`);
+  }
 
-    // Scan message PDAs 0-9 directly — do NOT rely on chat.messageCount
-    // because the chat account may be stale/cached even with getAccountInfo
+  async findPeerEncryptionKey(chatId: number, myAddress: string): Promise<Uint8Array | null> {
+    // Use cache within a session to avoid hammering RPC with 60 calls per poll.
+    // Cache is on the program instance (recreated on page reload), so it's safe.
+    const cacheKey = `${chatId}:${myAddress}`;
+    if (this._peerKeyCache.has(cacheKey)) {
+      return this._peerKeyCache.get(cacheKey)!;
+    }
+
     console.log(`findPeerEncryptionKey: chatId=${chatId}, myAddr=${myAddress.slice(0, 8)}...`);
 
     const coder = new BorshCoder(idl as Idl);
+    let lastFoundKey: Uint8Array | null = null;
+    let lastFoundIdx = -1;
     let consecutiveMisses = 0;
-    for (let i = 0; i < 10; i++) {
+
+    // Scan up to 60 messages — high enough for active chats, returns the LATEST key found
+    for (let i = 0; i < 60; i++) {
       try {
         const [pda] = getMessagePda(chatId, i);
         const accInfo = await this.provider.connection.getAccountInfo(pda, "confirmed");
         if (!accInfo) {
           consecutiveMisses++;
-          // If we've missed 3+ in a row, no more messages exist
-          if (consecutiveMisses >= 3) break;
+          if (consecutiveMisses >= 5) break; // 5 consecutive misses = end of chat
           continue;
         }
         consecutiveMisses = 0;
@@ -913,14 +1186,20 @@ export class ShyftClient {
         if (isPubkeyMessage(content)) {
           const key = parsePubkeyMessage(content);
           if (key && key.length === 32) {
-            console.log(`  ✅ Found peer key at msg[${i}]!`);
-            this._peerKeyCache.set(cacheKey, key);
-            return key;
+            // Keep scanning — we want the MOST RECENT key, not the first
+            lastFoundKey = key;
+            lastFoundIdx = i;
           }
         }
       } catch (err) {
         console.log(`  msg[${i}]: fetch failed (${err})`);
       }
+    }
+
+    if (lastFoundKey) {
+      console.log(`  ✅ Using peer key from msg[${lastFoundIdx}] (most recent)`);
+      this._peerKeyCache.set(cacheKey, lastFoundKey);
+      return lastFoundKey;
     }
     console.log("  ❌ No peer key found");
     return null;
@@ -983,6 +1262,8 @@ export class ShyftClient {
   }[]> {
     const rawMessages = await this.getMessagesForChat(chatId);
 
+    console.log(`getDecryptedMessages: chatId=${chatId}, myAddr=${myAddress.slice(0,8)}..., msgs=${rawMessages.length}, peerKeyLen=${peerPublicKey.length}`);
+
     return rawMessages.map((msg: any) => {
       const isMe = msg.sender === myAddress;
       const isKeyEx = isPubkeyMessage(msg.content);
@@ -996,6 +1277,9 @@ export class ShyftClient {
       } else if (isEnc) {
         // E2E encrypted — decrypt with peer's public + our secret
         decrypted = naclDecrypt(msg.content, peerPublicKey, mySecretKey);
+        if (!decrypted) {
+          console.warn(`  ❌ Decrypt FAILED for msg[${msg.messageIndex}] sender=${msg.sender?.toString().slice(0,8)}... isMe=${isMe}`);
+        }
       }
 
       return {

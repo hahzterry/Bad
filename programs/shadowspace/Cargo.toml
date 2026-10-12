@@ -10,6 +10,9 @@ name = "shadowspace"
 
 [features]
 default = []
+# Swaps the accepted payment mint for a devnet stand-in — the real $SHYFT mint
+# has a revoked mint authority and so cannot exist off mainnet.
+devnet-mint = []
 cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []
@@ -21,4 +24,15 @@ anchor-debug = []
 
 [dependencies]
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
+# Only the classic token program. Note: account structs deliberately avoid
+# anchor-spl's Mint/TokenAccount types — pulling them into the IDL requires
+# anchor-spl/idl-build, which drags in token_2022 and re-resolves the
+# dependency graph into an unsatisfiable zeroize_derive requirement. Token
+# accounts are passed unchecked and validated by hand instead.
+anchor-spl = { version = "0.32.1", default-features = false, features = ["token"] }
 blake3 = "=1.5.5"
+# Private messaging (MagicBlock TEE / Private Ephemeral Rollups).
+# NOTE: 0.16.2 pulls Solana 3.x crates → this program now requires the
+# Solana 3.x build toolchain (platform-tools v1.52+, Rust 1.85+). Build with
+# `agave-install init 3.1.9` first. anchor-compat keeps Anchor 0.32.1.
+ephemeral-rollups-sdk = { version = "0.16.2", features = ["anchor-compat", "access-control"] }

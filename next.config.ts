@@ -16,6 +16,12 @@ const nextConfig: NextConfig = {
       { protocol: "https", hostname: "freeimage.host" },
       { protocol: "https", hostname: "**.freeimage.host" },
       { protocol: "https", hostname: "img.youtube.com" },
+      // IPFS gateways
+      { protocol: "https", hostname: "ipfs.io" },
+      { protocol: "https", hostname: "gateway.pinata.cloud" },
+      { protocol: "https", hostname: "gateway.pinata.cloud" },
+      { protocol: "https", hostname: "**.mypinata.cloud" },
+      { protocol: "https", hostname: "cloudflare-ipfs.com" },
     ],
   },
   async headers() {

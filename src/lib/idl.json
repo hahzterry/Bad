@@ -8,6 +8,101 @@
   },
   "instructions": [
     {
+      "name": "admin_backfill_username",
+      "docs": [
+        "One-time migration: mint the registry record for a username that a",
+        "profile already displays.",
+        "",
+        "The name is taken from the profile itself, not chosen by the admin —",
+        "this can only ratify what is already on-chain, never assign a name to",
+        "someone. `init` means a second backfill of the same name fails, which",
+        "is what resolves the pre-existing duplicates: whoever is backfilled",
+        "first keeps it, so the script must submit the rightful owner.",
+        "",
+        "Must be run for every existing username BEFORE public claiming opens,",
+        "or squatters will take names their owners have used for months."
+      ],
+      "discriminator": [
+        223,
+        16,
+        181,
+        38,
+        135,
+        206,
+        24,
+        83
+      ],
+      "accounts": [
+        {
+          "name": "username_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "profile",
+          "docs": [
+            "Read-only: the backfill ratifies this profile's existing username."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "profile.owner",
+                "account": "Profile"
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        }
+      ]
+    },
+    {
       "name": "admin_force_close",
       "docs": [
         "Admin force-close: lets the upgrade authority close ANY program account",
@@ -38,6 +133,303 @@
         }
       ],
       "args": []
+    },
+    {
+      "name": "append_private_message",
+      "docs": [
+        "(ER) Append a message — MUTATES the delegated inbox (ring buffer)."
+      ],
+      "discriminator": [
+        148,
+        126,
+        52,
+        20,
+        251,
+        39,
+        25,
+        7
+      ],
+      "accounts": [
+        {
+          "name": "inbox",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  98,
+                  111,
+                  120
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "sender",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "_chat_id",
+          "type": "u64"
+        },
+        {
+          "name": "content",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "buy_username",
+      "docs": [
+        "Buy a listed username. Signed by the buyer alone.",
+        "",
+        "Payment and handover happen in one instruction, so neither side can be",
+        "left short: the tokens only move if the name moves."
+      ],
+      "discriminator": [
+        198,
+        135,
+        224,
+        174,
+        74,
+        242,
+        11,
+        44
+      ],
+      "accounts": [
+        {
+          "name": "listing",
+          "docs": [
+            "Rent goes back to whoever FUNDED the listing (rent_payer), never the",
+            "seller — otherwise list→delist loops drain the funder."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  115,
+                  116,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "rent_payer",
+          "docs": [
+            "listing's rent refund on close."
+          ],
+          "writable": true,
+          "relations": [
+            "listing"
+          ]
+        },
+        {
+          "name": "username_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "buyer_profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "buyer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "buyer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "seller",
+          "docs": [
+            "and the listing's rent refund."
+          ],
+          "writable": true,
+          "relations": [
+            "listing"
+          ]
+        },
+        {
+          "name": "buyer_token",
+          "writable": true
+        },
+        {
+          "name": "seller_token",
+          "writable": true
+        },
+        {
+          "name": "treasury_token",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "claim_username",
+      "docs": [
+        "Claim a username into the on-chain registry.",
+        "",
+        "Uniqueness is enforced by the runtime, not by a client-side scan: the",
+        "record PDA is seeded by the name itself, so `init` fails outright if the",
+        "name is already claimed. `name` must already be lowercase — the seed is",
+        "the raw bytes, so accepting mixed case would let \"Alice\" and \"alice\"",
+        "both exist."
+      ],
+      "discriminator": [
+        161,
+        41,
+        99,
+        255,
+        196,
+        83,
+        221,
+        148
+      ],
+      "accounts": [
+        {
+          "name": "username_record",
+          "docs": [
+            "Seeded by the name itself — this is what makes the name unique on-chain."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "user",
+          "signer": true
+        },
+        {
+          "name": "payer",
+          "docs": [
+            "Fee payer — can be a server keypair for gasless UX"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        }
+      ]
     },
     {
       "name": "close_chat",
@@ -447,6 +839,63 @@
       "args": [
         {
           "name": "_post_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "close_private_inbox",
+      "docs": [
+        "Close a private inbox and refund its rent to the treasury. Only valid AFTER",
+        "undelegate_private_inbox has returned the account to base layer (a delegated",
+        "account is owned by the delegation program, so this would fail on it)."
+      ],
+      "discriminator": [
+        32,
+        155,
+        221,
+        124,
+        78,
+        164,
+        171,
+        45
+      ],
+      "accounts": [
+        {
+          "name": "inbox",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  98,
+                  111,
+                  120
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "treasury",
+          "writable": true
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "_chat_id",
           "type": "u64"
         }
       ]
@@ -1089,6 +1538,61 @@
       ]
     },
     {
+      "name": "create_private_inbox",
+      "docs": [
+        "(Base) Create the inbox + pre-fund its ephemeral-permission rent."
+      ],
+      "discriminator": [
+        125,
+        48,
+        193,
+        246,
+        22,
+        72,
+        148,
+        21
+      ],
+      "accounts": [
+        {
+          "name": "inbox",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  98,
+                  111,
+                  120
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "chat_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "create_profile",
       "discriminator": [
         225,
@@ -1154,6 +1658,544 @@
         },
         {
           "name": "bio",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "delegate_chat_private",
+      "docs": [
+        "(Base) Delegate the chat PDA to a TEE validator (first remaining account)."
+      ],
+      "discriminator": [
+        61,
+        55,
+        201,
+        63,
+        223,
+        148,
+        144,
+        178
+      ],
+      "accounts": [
+        {
+          "name": "buffer_pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pda"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                196,
+                176,
+                70,
+                209,
+                58,
+                44,
+                29,
+                147,
+                91,
+                38,
+                246,
+                171,
+                162,
+                247,
+                132,
+                39,
+                27,
+                70,
+                133,
+                139,
+                24,
+                180,
+                210,
+                84,
+                165,
+                145,
+                184,
+                252,
+                177,
+                116,
+                83,
+                119
+              ]
+            }
+          }
+        },
+        {
+          "name": "delegation_record_pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pda"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "delegation_program"
+            }
+          }
+        },
+        {
+          "name": "delegation_metadata_pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110,
+                  45,
+                  109,
+                  101,
+                  116,
+                  97,
+                  100,
+                  97,
+                  116,
+                  97
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pda"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "delegation_program"
+            }
+          }
+        },
+        {
+          "name": "pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  97,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "owner_program",
+          "address": "EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ"
+        },
+        {
+          "name": "delegation_program",
+          "address": "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "chat_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "delegate_private_inbox",
+      "docs": [
+        "(Base) Delegate the inbox to a TEE validator (first remaining account)."
+      ],
+      "discriminator": [
+        219,
+        249,
+        215,
+        11,
+        170,
+        232,
+        63,
+        227
+      ],
+      "accounts": [
+        {
+          "name": "buffer_pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pda"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                196,
+                176,
+                70,
+                209,
+                58,
+                44,
+                29,
+                147,
+                91,
+                38,
+                246,
+                171,
+                162,
+                247,
+                132,
+                39,
+                27,
+                70,
+                133,
+                139,
+                24,
+                180,
+                210,
+                84,
+                165,
+                145,
+                184,
+                252,
+                177,
+                116,
+                83,
+                119
+              ]
+            }
+          }
+        },
+        {
+          "name": "delegation_record_pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pda"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "delegation_program"
+            }
+          }
+        },
+        {
+          "name": "delegation_metadata_pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110,
+                  45,
+                  109,
+                  101,
+                  116,
+                  97,
+                  100,
+                  97,
+                  116,
+                  97
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pda"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "delegation_program"
+            }
+          }
+        },
+        {
+          "name": "pda",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  98,
+                  111,
+                  120
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "owner_program",
+          "address": "EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ"
+        },
+        {
+          "name": "delegation_program",
+          "address": "DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "chat_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "delist_username",
+      "docs": [
+        "Withdraw a listing and take the name back."
+      ],
+      "discriminator": [
+        140,
+        83,
+        160,
+        68,
+        207,
+        74,
+        168,
+        103
+      ],
+      "accounts": [
+        {
+          "name": "listing",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  115,
+                  116,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "rent_payer",
+          "docs": [
+            "rent refund on close."
+          ],
+          "writable": true,
+          "relations": [
+            "listing"
+          ]
+        },
+        {
+          "name": "username_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "seller",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "listing"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "edit_post",
+      "discriminator": [
+        218,
+        25,
+        82,
+        105,
+        200,
+        189,
+        238,
+        75
+      ],
+      "accounts": [
+        {
+          "name": "post",
+          "docs": [
+            "The post PDA — seeded by the author's pubkey, so only the real author's post is found"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "author"
+              },
+              {
+                "kind": "arg",
+                "path": "post_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "author",
+          "docs": [
+            "Must be the original author — if anyone else signs, the seed/constraint check fails"
+          ],
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "_post_id",
+          "type": "u64"
+        },
+        {
+          "name": "new_content",
           "type": "string"
         }
       ]
@@ -1268,6 +2310,276 @@
         }
       ],
       "args": []
+    },
+    {
+      "name": "fund_chat_permission",
+      "docs": [
+        "Top up the existing chat PDA with enough lamports for its ephemeral permission",
+        "rent, so it can sign/pay when the permission is created on the ER."
+      ],
+      "discriminator": [
+        182,
+        122,
+        212,
+        216,
+        57,
+        216,
+        119,
+        100
+      ],
+      "accounts": [
+        {
+          "name": "chat",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  97,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "_chat_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "init_chat_permission",
+      "docs": [
+        "(ER) Create the EphemeralPermission — `Some(members)` = PRIVATE, locked to those wallets."
+      ],
+      "discriminator": [
+        152,
+        134,
+        22,
+        38,
+        104,
+        30,
+        243,
+        121
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "chat",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  97,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "permission",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  114,
+                  109,
+                  105,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110,
+                  58
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "chat"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "permission_program"
+            }
+          }
+        },
+        {
+          "name": "permission_program",
+          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+        },
+        {
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "chat_id",
+          "type": "u64"
+        },
+        {
+          "name": "members",
+          "type": {
+            "option": {
+              "vec": {
+                "defined": {
+                  "name": "Member"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "init_inbox_permission",
+      "docs": [
+        "(ER) Create the inbox permission — members-only = PRIVATE."
+      ],
+      "discriminator": [
+        149,
+        243,
+        53,
+        121,
+        100,
+        97,
+        150,
+        218
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "inbox",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  110,
+                  98,
+                  111,
+                  120
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "chat_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "permission",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  114,
+                  109,
+                  105,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110,
+                  58
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "inbox"
+              }
+            ],
+            "program": {
+              "kind": "account",
+              "path": "permission_program"
+            }
+          }
+        },
+        {
+          "name": "permission_program",
+          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+        },
+        {
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "chat_id",
+          "type": "u64"
+        },
+        {
+          "name": "members",
+          "type": {
+            "option": {
+              "vec": {
+                "defined": {
+                  "name": "Member"
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     {
       "name": "join_community",
@@ -1481,6 +2793,9 @@
         },
         {
           "name": "user",
+          "docs": [
+            "Must be the profile owner — prevents others from kicking members"
+          ],
           "writable": true,
           "signer": true
         },
@@ -1560,16 +2875,178 @@
           }
         },
         {
+          "name": "like_record",
+          "docs": [
+            "One LikeRecord PDA per (post, liker) — init will fail if they've already liked"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  107,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "post"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
           "name": "user",
           "docs": [
-            "The liker — must be the profile owner"
+            "The liker — must be the profile owner (read-only, no SOL needed)"
           ],
           "signer": true
+        },
+        {
+          "name": "payer",
+          "docs": [
+            "Treasury pays for like_record rent"
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [
         {
           "name": "_post_id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "list_username",
+      "docs": [
+        "List a username for sale at a fixed price in $SHYFT.",
+        "",
+        "The name is escrowed by reassigning the record to the listing PDA, so",
+        "the seller cannot transfer it out from under a buyer — and, crucially,",
+        "a buyer can complete the purchase later without the seller online.",
+        "",
+        "You cannot list the name you are currently displaying — switch away",
+        "first. Enforcing that here (rather than minting a replacement on every",
+        "listing) means relisting or changing your price costs nothing, and a",
+        "seller holding several names keeps the one they actually use."
+      ],
+      "discriminator": [
+        239,
+        211,
+        152,
+        104,
+        105,
+        21,
+        227,
+        11
+      ],
+      "accounts": [
+        {
+          "name": "listing",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  115,
+                  116,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "username_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "seller_profile",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "seller"
+              }
+            ]
+          }
+        },
+        {
+          "name": "seller",
+          "signer": true
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "price",
           "type": "u64"
         }
       ]
@@ -1626,6 +3103,111 @@
         }
       ],
       "args": []
+    },
+    {
+      "name": "process_undelegation",
+      "discriminator": [
+        196,
+        28,
+        41,
+        206,
+        48,
+        37,
+        51,
+        167
+      ],
+      "accounts": [
+        {
+          "name": "base_account",
+          "writable": true
+        },
+        {
+          "name": "buffer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  110,
+                  100,
+                  101,
+                  108,
+                  101,
+                  103,
+                  97,
+                  116,
+                  101,
+                  45,
+                  98,
+                  117,
+                  102,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "base_account"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                181,
+                183,
+                0,
+                225,
+                242,
+                87,
+                58,
+                192,
+                204,
+                6,
+                34,
+                1,
+                52,
+                74,
+                207,
+                151,
+                184,
+                53,
+                6,
+                235,
+                140,
+                229,
+                25,
+                152,
+                204,
+                98,
+                126,
+                24,
+                147,
+                128,
+                167,
+                62
+              ]
+            }
+          }
+        },
+        {
+          "name": "payer",
+          "writable": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "account_seeds",
+          "type": {
+            "vec": "bytes"
+          }
+        }
+      ]
     },
     {
       "name": "react_to_post",
@@ -1855,6 +3437,278 @@
       ]
     },
     {
+      "name": "set_display_username",
+      "docs": [
+        "Point your profile at one of the names you own.",
+        "",
+        "This is what keeps a wallet from being trapped: names are owned",
+        "independently of which one you display, so you can hold several and",
+        "switch freely, or free up the displayed one before selling it."
+      ],
+      "discriminator": [
+        159,
+        240,
+        244,
+        13,
+        124,
+        118,
+        248,
+        80
+      ],
+      "accounts": [
+        {
+          "name": "username_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "user",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "transfer_username",
+      "docs": [
+        "Transfer a username to another wallet.",
+        "",
+        "Both parties sign. Requiring the recipient's signature is deliberate:",
+        "the instruction writes the name onto their profile, so a one-sided",
+        "transfer would let anyone overwrite a stranger's displayed username.",
+        "",
+        "You cannot give away the name you are currently displaying — call",
+        "`set_display_username` (or claim a new name, which displays it) first.",
+        "That single rule is what guarantees nobody is ever left nameless,",
+        "without forcing them to mint a throwaway name on every transfer."
+      ],
+      "discriminator": [
+        249,
+        219,
+        120,
+        168,
+        30,
+        177,
+        38,
+        41
+      ],
+      "accounts": [
+        {
+          "name": "username_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  117,
+                  115,
+                  101,
+                  114,
+                  110,
+                  97,
+                  109,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "from_profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "current_owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "to_profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  102,
+                  105,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "new_owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "current_owner",
+          "signer": true
+        },
+        {
+          "name": "new_owner",
+          "docs": [
+            "Signs too — see `transfer_username` for why this is not one-sided."
+          ],
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "undelegate_chat",
+      "docs": [
+        "(ER) Commit chat state to Solana and return control of the chat PDA so it can be closed."
+      ],
+      "discriminator": [
+        150,
+        177,
+        226,
+        150,
+        17,
+        196,
+        118,
+        173
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "chat",
+          "writable": true
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        },
+        {
+          "name": "magic_context",
+          "writable": true,
+          "address": "MagicContext1111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "undelegate_private_inbox",
+      "docs": [
+        "(ER) Commit inbox state back to Solana."
+      ],
+      "discriminator": [
+        227,
+        220,
+        161,
+        64,
+        188,
+        126,
+        166,
+        176
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "inbox",
+          "writable": true
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        },
+        {
+          "name": "magic_context",
+          "writable": true,
+          "address": "MagicContext1111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "unfollow_user",
       "discriminator": [
         204,
@@ -2021,6 +3875,65 @@
       ]
     },
     {
+      "name": "update_price",
+      "docs": [
+        "Reprice an open listing without unwinding the escrow."
+      ],
+      "discriminator": [
+        61,
+        34,
+        117,
+        155,
+        75,
+        34,
+        123,
+        208
+      ],
+      "accounts": [
+        {
+          "name": "listing",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  115,
+                  116,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              }
+            ]
+          }
+        },
+        {
+          "name": "seller",
+          "signer": true,
+          "relations": [
+            "listing"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "_name",
+          "type": "string"
+        },
+        {
+          "name": "new_price",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "update_profile",
       "discriminator": [
         98,
@@ -2090,6 +4003,10 @@
         },
         {
           "name": "banner_url",
+          "type": "string"
+        },
+        {
+          "name": "website_url",
           "type": "string"
         }
       ]
@@ -2268,6 +4185,32 @@
       ]
     },
     {
+      "name": "LikeRecord",
+      "discriminator": [
+        179,
+        237,
+        53,
+        5,
+        91,
+        236,
+        161,
+        50
+      ]
+    },
+    {
+      "name": "Listing",
+      "discriminator": [
+        218,
+        32,
+        50,
+        73,
+        43,
+        134,
+        26,
+        58
+      ]
+    },
+    {
       "name": "Membership",
       "discriminator": [
         231,
@@ -2333,6 +4276,19 @@
       ]
     },
     {
+      "name": "PrivateInbox",
+      "discriminator": [
+        158,
+        170,
+        6,
+        130,
+        205,
+        7,
+        3,
+        77
+      ]
+    },
+    {
       "name": "Profile",
       "discriminator": [
         184,
@@ -2356,6 +4312,19 @@
         221,
         142,
         139
+      ]
+    },
+    {
+      "name": "UsernameRecord",
+      "discriminator": [
+        42,
+        172,
+        136,
+        41,
+        240,
+        123,
+        100,
+        204
       ]
     }
   ],
@@ -2414,6 +4383,41 @@
       "code": 6010,
       "name": "PollAlreadyEnded",
       "msg": "Poll has ended"
+    },
+    {
+      "code": 6011,
+      "name": "AlreadyLiked",
+      "msg": "Already liked this post"
+    },
+    {
+      "code": 6012,
+      "name": "CannotLikeOwnPost",
+      "msg": "Cannot like your own post"
+    },
+    {
+      "code": 6013,
+      "name": "InvalidReactionType",
+      "msg": "Invalid reaction type"
+    },
+    {
+      "code": 6014,
+      "name": "InvalidUsername",
+      "msg": "Username must be lowercase a-z, 0-9 or underscore"
+    },
+    {
+      "code": 6015,
+      "name": "NotUsernameOwner",
+      "msg": "You do not own this username"
+    },
+    {
+      "code": 6016,
+      "name": "MustSwitchNameFirst",
+      "msg": "Switch to another username before moving this one"
+    },
+    {
+      "code": 6017,
+      "name": "UsernameNotClaimed",
+      "msg": "Create the profile with an empty username, then claim a name"
     }
   ],
   "types": [
@@ -2520,6 +4524,108 @@
           },
           {
             "name": "following",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "InboxMsg",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sender",
+            "type": "pubkey"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          },
+          {
+            "name": "content",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "LikeRecord",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "post",
+            "type": "pubkey"
+          },
+          {
+            "name": "liker",
+            "type": "pubkey"
+          },
+          {
+            "name": "liked_at",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Listing",
+      "docs": [
+        "An open fixed-price sale. Its existence means the name is escrowed."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "seller",
+            "type": "pubkey"
+          },
+          {
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "name": "price",
+            "docs": [
+              "Price in $SHYFT base units (6 decimals)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "rent_payer",
+            "docs": [
+              "Who funded this listing's rent — the ONLY account the rent may be",
+              "refunded to on close. Refunding to the seller instead lets an attacker",
+              "loop list→delist and drain whoever paid (the treasury, in gasless mode)."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Member",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "flags",
+            "type": "u8"
+          },
+          {
+            "name": "pubkey",
             "type": "pubkey"
           }
         ]
@@ -2709,6 +4815,36 @@
           {
             "name": "created_at",
             "type": "i64"
+          },
+          {
+            "name": "updated_at",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PrivateInbox",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "chat_id",
+            "type": "u64"
+          },
+          {
+            "name": "total",
+            "type": "u64"
+          },
+          {
+            "name": "messages",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "InboxMsg"
+                }
+              }
+            }
           }
         ]
       }
@@ -2784,6 +4920,45 @@
           },
           {
             "name": "reaction_type",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UsernameRecord",
+      "docs": [
+        "A claimed username. Seeded by the name, owned by a wallet, transferable",
+        "independently of the profile that displays it."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "name": "profile",
+            "docs": [
+              "Profile currently displaying this name."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "transfer_count",
+            "type": "u32"
+          },
+          {
+            "name": "bump",
             "type": "u8"
           }
         ]

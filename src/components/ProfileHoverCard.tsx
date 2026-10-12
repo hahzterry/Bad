@@ -2,9 +2,12 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import { BadgeCheck } from "lucide-react";
+import { handleIpfsImgError } from "@/components/RichContent";
 import { useAppStore } from "@/lib/store";
 
 const GOLD_BADGE_USERNAMES = ["shaan", "shyft"];
+// Profiles created before this Unix timestamp (May 12 2026) keep their blue badge
+const BLUE_BADGE_CUTOFF_UNIX = 1778544000;
 
 /** Delay (ms) before the hover card appears / disappears */
 const SHOW_DELAY = 400;
@@ -22,12 +25,15 @@ interface ProfileHoverCardProps {
     followerCount?: number;
     followingCount?: number;
     postCount?: number;
+    createdAt?: string | number;
   } | null | undefined;
   /** Children to wrap (the trigger element) */
   children: React.ReactNode;
+  /** Optional wrapper className override (default: inline-flex) */
+  wrapperClassName?: string;
 }
 
-export default function ProfileHoverCard({ walletAddress, profile, children }: ProfileHoverCardProps) {
+export default function ProfileHoverCard({ walletAddress, profile, children, wrapperClassName }: ProfileHoverCardProps) {
   const [show, setShow] = useState(false);
   const showTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -65,6 +71,8 @@ export default function ProfileHoverCard({ walletAddress, profile, children }: P
     : walletAddress.slice(0, 8);
   const realUsername = profile.username || "";
   const isGold = GOLD_BADGE_USERNAMES.includes(realUsername.toLowerCase());
+  const profileCreatedAt = parseInt(String(profile.createdAt || 0), 10);
+  const isOGUser = !isGold && profileCreatedAt > 0 && profileCreatedAt < BLUE_BADGE_CUTOFF_UNIX;
   const bio = profile.bio || "";
   const followers = Number(profile.followerCount || 0);
   const following = Number(profile.followingCount || 0);
@@ -73,7 +81,7 @@ export default function ProfileHoverCard({ walletAddress, profile, children }: P
   return (
     <div
       ref={containerRef}
-      className="relative inline-flex"
+      className={`relative ${wrapperClassName || "inline-flex"}`}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
@@ -96,6 +104,7 @@ export default function ProfileHoverCard({ walletAddress, profile, children }: P
               {profile.avatarUrl ? (
                 <img
                   src={profile.avatarUrl}
+                  onError={handleIpfsImgError}
                   alt={displayName}
                   className="w-14 h-14 rounded-full object-cover border-2 border-white shadow-sm hover:ring-2 hover:ring-[#2563EB]/30 transition-all"
                 />
@@ -115,7 +124,11 @@ export default function ProfileHoverCard({ walletAddress, profile, children }: P
           >
             <div className="flex items-center gap-1.5">
               <span className="font-bold text-[#1A1A2E] text-[15px] hover:underline">{displayName}</span>
-              <BadgeCheck className={`w-4 h-4 flex-shrink-0 ${isGold ? "text-[#F59E0B]" : "text-[#2563EB]"}`} />
+              {isGold ? (
+                <BadgeCheck className="w-4 h-4 flex-shrink-0 text-[#F59E0B]" />
+              ) : isOGUser ? (
+                <BadgeCheck className="w-4 h-4 flex-shrink-0 text-[#2563EB]" />
+              ) : null}
             </div>
             <span className="text-sm text-[#94A3B8] block -mt-0.5">@{username}</span>
           </button>

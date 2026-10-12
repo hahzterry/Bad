@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Shield, MessageCircle, Wallet, Lock, Users, ArrowRight, Zap, ChevronRight, Sparkles, Sun, Moon, Activity } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { Shield, MessageCircle, Wallet, Lock, Users, ArrowRight, Zap, ChevronRight, Sparkles, Sun, Moon, Activity, Smartphone, Globe } from "lucide-react";
 import { useWallet } from "@/hooks/usePrivyWallet";
 import { useAppStore } from "@/lib/store";
+import ChainSelector, { type ChainPreference, setChainPreference } from "@/components/ChainSelector";
 
 const features = [
   {
@@ -61,11 +62,23 @@ const features = [
 export default function Landing() {
   const [activeFeature, setActiveFeature] = useState(0);
   const [showApp, setShowApp] = useState(false);
+  const [showChainSelector, setShowChainSelector] = useState(false);
   const { login, ready } = useWallet();
   const { theme, toggleTheme } = useAppStore();
+
+  const handleChainSelect = useCallback((chain: ChainPreference) => {
+    setChainPreference(chain);
+    setShowChainSelector(false);
+    login();
+  }, [login]);
+
+  const openChainSelector = useCallback(() => {
+    setShowChainSelector(true);
+  }, []);
   const [stats, setStats] = useState<{
     profiles: number; posts: number; follows: number;
     reactions: number; comments: number; transactions: number;
+    tokens_launched: number;
   } | null>(null);
 
   // Fetch live on-chain stats
@@ -114,7 +127,7 @@ export default function Landing() {
             )}
           </button>
           <button
-            onClick={login}
+            onClick={openChainSelector}
             disabled={!ready}
             className="flex items-center gap-2 px-4 py-2 text-sm font-semibold bg-[#2563EB] hover:bg-[#1D4ED8] text-white rounded-lg transition-colors disabled:opacity-50"
           >
@@ -128,7 +141,7 @@ export default function Landing() {
         {/* Badge */}
         <div className="flex items-center gap-2 px-3 sm:px-4 py-1.5 bg-white border border-[#E2E8F0] rounded-full mb-5 sm:mb-6 shadow-sm">
           <div className="w-2 h-2 rounded-full bg-[#16A34A] animate-pulse" />
-          <span className="text-[10px] sm:text-xs font-medium text-[#64748B]">Built on Solana · Zero Gas Fees</span>
+          <span className="text-[10px] sm:text-xs font-medium text-[#64748B]">Built on Solana · Base support live · Zero Gas Fees</span>
         </div>
 
         {/* Title */}
@@ -146,7 +159,7 @@ export default function Landing() {
         <div className="flex flex-col sm:flex-row items-center gap-3 sm:gap-4 mt-6 sm:mt-8 w-full sm:w-auto">
           <div className="w-full sm:w-auto flex justify-center">
             <button
-              onClick={login}
+              onClick={openChainSelector}
               disabled={!ready}
               className="flex items-center gap-2 px-6 py-3 text-sm font-semibold bg-[#2563EB] hover:bg-[#1D4ED8] text-white rounded-xl transition-colors disabled:opacity-50 shadow-lg shadow-blue-200"
             >
@@ -185,35 +198,108 @@ export default function Landing() {
         </div>
       </div>
 
-      {/* Live On-Chain Stats */}
-      {stats && (
-        <div className="px-4 sm:px-6 md:px-12 py-8 sm:py-10 bg-white border-t border-[#E2E8F0]">
-          <div className="max-w-4xl mx-auto">
-            <div className="flex items-center justify-center gap-2 mb-6">
-              <Activity className="w-4 h-4 text-[#16A34A]" />
-              <p className="text-xs font-semibold uppercase tracking-widest text-[#94A3B8]">Live On-Chain Stats</p>
-              <div className="w-2 h-2 rounded-full bg-[#16A34A] animate-pulse" />
+      {/* Live On-Chain Stats — Terminal */}
+      <div className="px-4 sm:px-6 md:px-12 py-10 sm:py-14 bg-white border-t border-[#E2E8F0]">
+        <div className="max-w-2xl mx-auto">
+          <div className="flex items-center justify-center gap-2 mb-6">
+            <Activity className="w-4 h-4 text-[#16A34A]" />
+            <p className="text-xs font-semibold uppercase tracking-widest text-[#94A3B8]">Live On-Chain Stats</p>
+            <div className="w-2 h-2 rounded-full bg-[#16A34A] animate-pulse" />
+          </div>
+
+          {/* Terminal window */}
+          <div className="rounded-2xl overflow-hidden border border-[#1E293B] shadow-2xl shadow-black/20">
+            {/* Title bar */}
+            <div className="flex items-center gap-2 px-4 py-3 bg-[#1E293B]">
+              <div className="w-3 h-3 rounded-full bg-[#FF5F56]" />
+              <div className="w-3 h-3 rounded-full bg-[#FFBD2E]" />
+              <div className="w-3 h-3 rounded-full bg-[#27C93F]" />
+              <span className="ml-3 text-[11px] text-[#64748B] font-mono">shyft@solana:~$</span>
+              <span className="ml-1 text-[11px] text-[#94A3B8] font-mono">query program EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ</span>
             </div>
-            <div className="grid grid-cols-2 gap-3 sm:gap-4 max-w-md mx-auto">
-              {[
-                { label: "Profiles", value: stats.profiles, icon: "👤", color: "#2563EB" },
-                { label: "Transactions", value: stats.transactions, icon: "⚡", color: "#16A34A" },
-              ].map((stat, i) => (
-                <div key={i} className="bg-[#F8FAFC] rounded-2xl border border-[#E2E8F0] p-4 sm:p-5 text-center hover:shadow-md transition-shadow">
-                  <span className="text-2xl">{stat.icon}</span>
-                  <p className="text-2xl sm:text-3xl font-bold mt-2" style={{ color: stat.color }}>
-                    {stat.value.toLocaleString()}
-                  </p>
-                  <p className="text-[10px] sm:text-xs text-[#94A3B8] mt-1 font-medium">{stat.label}</p>
-                </div>
-              ))}
+
+            {/* Terminal body */}
+            <div className="bg-[#0F172A] px-5 py-5 font-mono text-sm space-y-2">
+              <div className="text-[#64748B] text-xs mb-3">
+                <span className="text-[#2563EB]">$</span> fetching on-chain data from Solana mainnet...
+              </div>
+
+              {stats ? (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2">
+                    {[
+                      { key: "profiles",        label: "profiles",        value: stats.profiles,        color: "#60A5FA" },
+                      { key: "transactions",    label: "transactions",     value: stats.transactions,    color: "#34D399" },
+                      { key: "posts",           label: "posts",            value: stats.posts,           color: "#A78BFA" },
+                      { key: "comments",        label: "comments",         value: stats.comments,        color: "#F472B6" },
+                      { key: "follows",         label: "follows",          value: stats.follows,         color: "#FBBF24" },
+                      { key: "reactions",       label: "reactions",        value: stats.reactions,       color: "#FB923C" },
+                      { key: "tokens_launched", label: "tokens_launched",  value: stats.tokens_launched, color: "#22D3EE" },
+                    ].map((s) => (
+                      <div key={s.key} className="flex items-center gap-2">
+                        <span className="text-[#475569] text-xs w-2">›</span>
+                        <span className="text-[#94A3B8] text-xs w-36">{s.label}</span>
+                        <span className="text-xs font-bold" style={{ color: s.color }}>
+                          {s.value.toLocaleString()}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="border-t border-[#1E293B] mt-4 pt-4 space-y-1">
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-[#475569]">›</span>
+                      <span className="text-[#94A3B8]">program_id</span>
+                      <span className="text-[#60A5FA] break-all">EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-[#475569]">›</span>
+                      <span className="text-[#94A3B8]">network</span>
+                      <span className="text-[#34D399]">mainnet-beta</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-[#475569]">›</span>
+                      <span className="text-[#94A3B8]">status</span>
+                      <span className="text-[#34D399] flex items-center gap-1">
+                        <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#34D399] animate-pulse" />
+                        live
+                      </span>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="text-[#64748B] text-xs animate-pulse">loading chain data<span className="animate-ping">_</span></div>
+              )}
+
+              {/* Prompt line */}
+              <div className="flex items-center gap-1 pt-3">
+                <span className="text-[#2563EB] text-xs">$</span>
+                <span className="w-2 h-4 bg-[#60A5FA] animate-pulse inline-block rounded-sm ml-1" />
+              </div>
             </div>
-            <p className="text-center text-[10px] text-[#CBD5E1] mt-4">
-              Real-time data from Solana mainnet · Program EEno...MxjQ
-            </p>
+          </div>
+
+          <div className="flex items-center justify-center gap-3 mt-4">
+            <a
+              href="https://solscan.io/account/EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 text-[11px] text-[#64748B] hover:text-[#2563EB] transition-colors"
+            >
+              <Zap className="w-3 h-3" /> View on Solscan ↗
+            </a>
+            <span className="text-[#CBD5E1]">·</span>
+            <a
+              href="https://explorer.solana.com/address/EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 text-[11px] text-[#64748B] hover:text-[#2563EB] transition-colors"
+            >
+              <Activity className="w-3 h-3" /> Solana Explorer ↗
+            </a>
           </div>
         </div>
-      )}
+      </div>
 
       {/* Feature Preview Section */}
       <div id="features" className="px-4 sm:px-6 md:px-12 py-12 sm:py-16 md:py-24 bg-white border-t border-[#E2E8F0]">
@@ -390,6 +476,105 @@ export default function Landing() {
         </div>
       </div>
 
+      {/* Mobile App Showcase */}
+      <div className="px-4 sm:px-6 md:px-12 py-14 sm:py-20 border-t border-[#E2E8F0] bg-white">
+        <div className="max-w-5xl mx-auto">
+          <div className="grid md:grid-cols-2 gap-10 sm:gap-16 items-center">
+            {/* Text side */}
+            <div>
+              <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-purple-50 border border-purple-200 rounded-full mb-5">
+                <Smartphone className="w-3.5 h-3.5 text-purple-500" />
+                <span className="text-[11px] font-medium text-purple-600">Native iOS App</span>
+              </div>
+              <h3 className="text-2xl sm:text-3xl md:text-4xl font-bold text-[#1A1A2E] leading-tight mb-4">
+                Take your social<br />
+                <span className="bg-gradient-to-r from-[#7C3AED] to-[#2563EB] bg-clip-text text-transparent">on the go</span>
+              </h3>
+              <p className="text-sm sm:text-base text-[#64748B] leading-relaxed mb-6">
+                The full Shyft experience in a native iOS app. Post, chat, send payments — all from your phone with zero wallet popups. Embedded wallet signs silently in the background.
+              </p>
+              <div className="space-y-3 mb-8">
+                {[
+                  { icon: <Zap className="w-4 h-4 text-[#F59E0B]" />, bg: "bg-amber-50", text: "Silent transaction signing — no popups ever" },
+                  { icon: <Lock className="w-4 h-4 text-[#16A34A]" />, bg: "bg-green-50", text: "Same E2E encryption as the web app" },
+                  { icon: <Globe className="w-4 h-4 text-[#2563EB]" />, bg: "bg-blue-50", text: "Synced with web — one identity everywhere" },
+                ].map((item, i) => (
+                  <div key={i} className="flex items-center gap-3">
+                    <div className={`w-8 h-8 rounded-lg ${item.bg} flex items-center justify-center flex-shrink-0`}>{item.icon}</div>
+                    <p className="text-sm text-[#475569]">{item.text}</p>
+                  </div>
+                ))}
+              </div>
+              <a
+                href="https://apps.apple.com/pk/app/shyft-web3-social/id6763483494"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-3 px-6 py-3.5 rounded-2xl bg-[#1A1A2E] hover:bg-[#2a2a3e] transition-all duration-200 shadow-lg hover:shadow-xl hover:-translate-y-0.5 group"
+              >
+                <svg className="w-7 h-7 text-white flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/>
+                </svg>
+                <div className="text-left">
+                  <div className="text-white/60 text-[10px] leading-none mb-0.5">Download on the</div>
+                  <div className="text-white text-base font-semibold leading-none">App Store</div>
+                </div>
+              </a>
+            </div>
+
+            {/* Phone mockup */}
+            <div className="flex items-center justify-center">
+              <div className="relative">
+                <div className="absolute inset-0 bg-gradient-to-r from-purple-200/40 to-blue-200/40 blur-3xl rounded-full scale-150" />
+                <div className="relative w-56 sm:w-64 bg-[#111] rounded-[3rem] border-2 border-[#333] shadow-2xl overflow-hidden" style={{ aspectRatio: '9/19.5' }}>
+                  <div className="absolute top-3 left-1/2 -translate-x-1/2 w-24 h-6 bg-[#111] rounded-full z-10 border border-[#333]" />
+                  <div className="absolute inset-0 bg-[#0d0d0d] flex flex-col pt-10 overflow-hidden">
+                    <div className="px-4 py-2.5 flex items-center justify-between border-b border-white/5">
+                      <div className="flex items-center gap-2">
+                        <img src="/shyftlogo.png" alt="" className="shyft-logo w-6 h-6 rounded-lg" style={{ filter: 'invert(1)' }} />
+                        <span className="text-white text-xs font-bold">Shyft</span>
+                      </div>
+                      <div className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-[10px]">✏️</div>
+                    </div>
+                    <div className="flex-1 overflow-hidden px-3 py-2 space-y-2">
+                      {[
+                        { avatar: "🧑‍💻", name: "dev.sol", time: "2m", text: "just deployed my first Solana program 🚀", likes: 24 },
+                        { avatar: "👩‍🎨", name: "art3mis.sol", time: "8m", text: "new NFT drop live! check the link below 🎨", likes: 47 },
+                        { avatar: "🤝", name: "vc.sol", time: "15m", text: "looking for founders building on Solana DM me", likes: 11 },
+                      ].map((post, i) => (
+                        <div key={i} className="rounded-xl p-2.5 border border-white/5">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500/30 to-purple-500/30 flex items-center justify-center text-xs">{post.avatar}</div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1">
+                                <span className="text-[10px] font-semibold text-white truncate">{post.name}</span>
+                                <div className="w-2 h-2 rounded-full bg-[#60A5FA] flex-shrink-0" />
+                              </div>
+                              <span className="text-[8px] text-white/30">{post.time} ago</span>
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-white/60 leading-snug">{post.text}</p>
+                          <div className="mt-1.5 flex items-center gap-2 text-[8px] text-white/20">
+                            <span>❤️ {post.likes}</span><span>💬</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="px-4 py-2 flex items-center justify-around border-t border-white/5">
+                      {["🏠", "🔍", "➕", "💬", "👤"].map((icon, i) => (
+                        <div key={i} className={`w-8 h-8 flex items-center justify-center rounded-lg text-sm ${i === 0 ? "bg-white/10" : ""}`}>{icon}</div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="absolute -right-0.5 top-20 w-1 h-12 bg-[#333] rounded-r-full" />
+                <div className="absolute -left-0.5 top-16 w-1 h-8 bg-[#333] rounded-l-full" />
+                <div className="absolute -left-0.5 top-28 w-1 h-12 bg-[#333] rounded-l-full" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* How it works */}
       <div className="px-4 sm:px-6 md:px-12 py-12 sm:py-16 bg-gradient-to-br from-[#EFF6FF] to-[#F0FDF4] border-t border-[#E2E8F0]">
         <div className="max-w-4xl mx-auto text-center">
@@ -461,6 +646,15 @@ export default function Landing() {
                 <p className="text-[10px] text-[#94A3B8]">Private Payments</p>
               </div>
             </a>
+            <a href="https://oobe.io" target="_blank" rel="noopener noreferrer" className="flex flex-col items-center gap-2 group">
+              <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl overflow-hidden border border-[#E2E8F0] group-hover:border-[#0EA5E9]/30 transition-all group-hover:shadow-lg">
+                <img src="/OOBE.jpg" alt="OOBE" className="w-full h-full object-cover" />
+              </div>
+              <div className="text-center">
+                <p className="text-sm font-bold text-[#1A1A2E]">OOBE</p>
+                <p className="text-[10px] text-[#94A3B8]">RPC Infrastructure</p>
+              </div>
+            </a>
           </div>
         </div>
       </div>
@@ -471,7 +665,7 @@ export default function Landing() {
         <h3 className="text-xl sm:text-2xl md:text-3xl font-bold text-[#1A1A2E] mb-3">Ready to own your social?</h3>
         <p className="text-xs sm:text-sm text-[#64748B] mb-6 sm:mb-8 max-w-md mx-auto">Sign in with email, Google, Twitter, or your Solana wallet — and start using the first fully on-chain social platform.</p>
         <button
-          onClick={login}
+          onClick={openChainSelector}
           disabled={!ready}
           className="flex items-center gap-2 px-6 py-3 text-sm font-semibold bg-[#2563EB] hover:bg-[#1D4ED8] text-white rounded-xl transition-colors disabled:opacity-50 shadow-lg shadow-blue-200 mx-auto"
         >
@@ -481,6 +675,14 @@ export default function Landing() {
           Program: EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ · Mainnet
         </p>
       </div>
+
+      {/* Chain selector modal */}
+      {showChainSelector && (
+        <ChainSelector
+          onSelect={handleChainSelect}
+          onClose={() => setShowChainSelector(false)}
+        />
+      )}
 
       {/* Footer */}
       <footer className="px-4 sm:px-6 md:px-12 py-5 sm:py-6 border-t border-[#E2E8F0] bg-[#F8FAFC]">

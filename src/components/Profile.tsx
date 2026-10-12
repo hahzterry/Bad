@@ -39,7 +39,7 @@ import { useExportWallet } from "@privy-io/react-auth/solana";
 import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { toast } from "@/components/Toast";
 import { RichContent } from "@/components/RichContent";
-import { uploadImage } from "@/components/RichContent";
+import { uploadImage, handleIpfsImgError } from "@/components/RichContent";
 import { ShyftClient, clearRpcCache } from "@/lib/program";
 import FollowListModal from "@/components/FollowListModal";
 
@@ -59,6 +59,8 @@ interface OnChainPost {
 
 // Gold badge for OG / founder accounts (module-level so all components can use it)
 const GOLD_BADGE_USERNAMES = ["shaan", "shyft"];
+// Profiles created before this Unix timestamp (May 12 2026) keep their blue badge
+const BLUE_BADGE_CUTOFF_UNIX = 1778544000;
 
 function timeAgo(ts: number): string {
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -101,7 +103,7 @@ const REACTIONS = [
 export default function Profile() {
   const { currentUser, setCurrentUser, isConnected, viewingProfile, setViewingProfile, setActiveTab: setAppTab } = useAppStore();
   const program = useProgram();
-  const { publicKey } = useWallet();
+  const { publicKey, evmAddress, activeChain } = useWallet();
 
   // Are we viewing someone else's profile?
   const isViewingOther = !!(viewingProfile && publicKey && viewingProfile !== publicKey.toBase58());
@@ -117,6 +119,7 @@ export default function Profile() {
   const [profileMap, setProfileMap] = useState<Record<string, any>>({});
   const [activeTab, setActiveTab] = useState<"posts" | "likes">("posts");
   const [copied, setCopied] = useState(false);
+  const [copiedEvm, setCopiedEvm] = useState(false);
   const [realFollowerCount, setRealFollowerCount] = useState(0);
   const [realFollowingCount, setRealFollowingCount] = useState(0);
 
@@ -156,6 +159,7 @@ export default function Profile() {
   const { user: privyUser } = usePrivy();
   const { exportWallet: exportSolanaWallet } = useExportWallet();
   const [walletBalance, setWalletBalance] = useState<number | null>(null);
+  const [ethBalance, setEthBalance] = useState<number | null>(null);
   const [loadingBalance, setLoadingBalance] = useState(false);
   const [showQR, setShowQR] = useState(false);
 
@@ -182,6 +186,7 @@ export default function Profile() {
   const [editBio, setEditBio] = useState("");
   const [editAvatarUrl, setEditAvatarUrl] = useState("");
   const [editBannerUrl, setEditBannerUrl] = useState("");
+  const [editWebsiteUrl, setEditWebsiteUrl] = useState("");
   const [editAvatarPreview, setEditAvatarPreview] = useState<string | null>(null);
   const [editBannerPreview, setEditBannerPreview] = useState<string | null>(null);
   const [editAvatarFile, setEditAvatarFile] = useState<File | null>(null);
@@ -216,6 +221,25 @@ export default function Profile() {
     const interval = setInterval(fetchBalance, 30_000);
     return () => clearInterval(interval);
   }, [fetchBalance]);
+
+  // Fetch ETH balance on Base for the EVM wallet
+  useEffect(() => {
+    if (!evmAddress) return;
+    const fetchEth = async () => {
+      try {
+        const res = await fetch("https://mainnet.base.org", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getBalance", params: [evmAddress, "latest"] }),
+        });
+        const data = await res.json();
+        if (data.result) setEthBalance(parseInt(data.result, 16) / 1e18);
+      } catch {}
+    };
+    fetchEth();
+    const interval = setInterval(fetchEth, 30_000);
+    return () => clearInterval(interval);
+  }, [evmAddress]);
 
   async function handleExportWallet() {
     if (!publicKey) {
@@ -332,6 +356,7 @@ export default function Profile() {
     setEditBio(profileBio);
     setEditAvatarUrl(onChainProfile?.avatarUrl || currentUser?.avatarUrl || "");
     setEditBannerUrl(onChainProfile?.bannerUrl || currentUser?.bannerUrl || "");
+    setEditWebsiteUrl(onChainProfile?.websiteUrl || "");
     setEditAvatarPreview(null);
     setEditBannerPreview(null);
     setEditAvatarFile(null);
@@ -391,6 +416,7 @@ export default function Profile() {
         editBio.trim(),
         avatarUrl,
         bannerUrl,
+        editWebsiteUrl.trim(),
       );
       toast("success", "Profile updated!", "Changes saved on-chain");
       clearRpcCache();
@@ -428,6 +454,7 @@ export default function Profile() {
   const bannerUrl = isViewingOther
     ? (onChainProfile?.bannerUrl || "")
     : (onChainProfile?.bannerUrl || currentUser?.bannerUrl || "");
+  const websiteUrl = onChainProfile?.websiteUrl || "";
 
   /* ── Follow state for viewing other profiles ── */
   const [isFollowingUser, setIsFollowingUser] = useState(false);
@@ -471,6 +498,7 @@ export default function Profile() {
 
   // Gold badge for OG / founder accounts
   const isGoldBadge = GOLD_BADGE_USERNAMES.includes(profileUsername.toLowerCase());
+  const isOGUser = !isGoldBadge && rawCreatedAt > 0 && rawCreatedAt < BLUE_BADGE_CUTOFF_UNIX;
   const badgeBg = isGoldBadge ? "bg-gradient-to-br from-[#F59E0B] to-[#D97706]" : "bg-[#2563EB]";
   const badgeTextColor = isGoldBadge ? "text-[#F59E0B]" : "text-[#2563EB]";
 
@@ -673,6 +701,7 @@ export default function Profile() {
             {avatarUrl ? (
               <img
                 src={avatarUrl}
+                onError={handleIpfsImgError}
                 alt={profileName}
                 className="w-[84px] h-[84px] rounded-full border-4 border-white object-cover shadow-lg"
               />
@@ -681,10 +710,12 @@ export default function Profile() {
                 {profileName.charAt(0).toUpperCase()}
               </div>
             )}
-            {/* on-chain verified badge */}
-            <div className={`absolute -bottom-0.5 -right-0.5 w-6 h-6 ${badgeBg} rounded-full flex items-center justify-center border-2 border-white`}>
-              <BadgeCheck className="w-3.5 h-3.5 text-white" />
-            </div>
+            {/* verified badge — gold for OGs, blue for existing users before cutoff */}
+            {(isGoldBadge || isOGUser) && (
+              <div className={`absolute -bottom-0.5 -right-0.5 w-6 h-6 ${badgeBg} rounded-full flex items-center justify-center border-2 border-white`}>
+                <BadgeCheck className="w-3.5 h-3.5 text-white" />
+              </div>
+            )}
           </div>
           <div className="mt-3 flex gap-2">
             {isViewingOther ? (
@@ -763,10 +794,17 @@ export default function Profile() {
 
         {/* Meta row */}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3">
-          <span className="flex items-center gap-1 text-[13px] text-[#64748B]">
-            <Globe className="w-3.5 h-3.5" />
-            Solana Mainnet
-          </span>
+          {websiteUrl && (
+            <a
+              href={websiteUrl.startsWith("http") ? websiteUrl : `https://${websiteUrl}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 text-[13px] text-[#2563EB] hover:underline"
+            >
+              <LinkIcon className="w-3.5 h-3.5" />
+              {websiteUrl.replace(/^https?:\/\//, "").replace(/\/$/, "")}
+            </a>
+          )}
           <span className="flex items-center gap-1 text-[13px] text-[#64748B]">
             <Calendar className="w-3.5 h-3.5" />
             Joined {joinDate}
@@ -916,6 +954,75 @@ export default function Profile() {
             </a>
           </div>
         </div>
+
+        {/* Base wallet card — shown when user has an EVM wallet */}
+        {evmAddress && (
+          <div className="mt-3 bg-gradient-to-br from-[#EFF6FF] to-[#DBEAFE] rounded-2xl border border-[#BFDBFE] p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: "#0052FF" }}>
+                  <svg viewBox="0 0 24 24" className="w-4 h-4 fill-white">
+                    <circle cx="12" cy="12" r="10" />
+                    <path fill="#0052FF" d="M12 4.5a7.5 7.5 0 1 0 0 15 7.5 7.5 0 0 0 0-15zm.55 11.4v-2.47h-1.1v2.47A4.5 4.5 0 0 1 7.5 12a4.5 4.5 0 0 1 4.5-4.5 4.5 4.5 0 0 1 4.45 3.9H14a2 2 0 1 0-2 2c.188 0 .372-.025.55-.1z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-[#1A1A2E]">Base Wallet</h3>
+                  <p className="text-[11px] text-[#3B82F6]">Base Mainnet · {activeChain === "base" ? "Active" : "Embedded"}</p>
+                </div>
+              </div>
+              {activeChain === "base" && (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#0052FF] text-white">Primary</span>
+              )}
+            </div>
+
+            {/* ETH balance */}
+            <div className="mb-4">
+              <p className="text-[11px] text-[#3B82F6] mb-0.5">Balance</p>
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-2xl font-extrabold text-[#1A1A2E]">
+                  {ethBalance !== null ? ethBalance.toFixed(4) : "..."}
+                </span>
+                <span className="text-sm font-medium text-[#3B82F6]">ETH</span>
+              </div>
+            </div>
+
+            {/* Base address */}
+            <div className="mb-4 bg-white rounded-xl border border-[#BFDBFE] px-3 py-2.5 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-[10px] text-[#93C5FD] mb-0.5">Base Address</p>
+                <p className="text-xs font-mono text-[#1A1A2E] truncate">{evmAddress}</p>
+              </div>
+              <button
+                onClick={() => { navigator.clipboard.writeText(evmAddress); setCopiedEvm(true); setTimeout(() => setCopiedEvm(false), 2000); }}
+                className="flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center hover:bg-[#EFF6FF] transition-colors"
+                title="Copy Base address"
+              >
+                {copiedEvm ? <Check className="w-3.5 h-3.5 text-[#16A34A]" /> : <Copy className="w-3.5 h-3.5 text-[#3B82F6]" />}
+              </button>
+            </div>
+
+            {/* Action buttons */}
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => { navigator.clipboard.writeText(evmAddress); setCopiedEvm(true); setTimeout(() => setCopiedEvm(false), 2000); }}
+                className="flex flex-col items-center gap-1.5 py-3 px-2 bg-white rounded-xl border border-[#BFDBFE] hover:bg-[#EFF6FF] hover:border-[#0052FF]/30 transition-all group"
+              >
+                <Copy className="w-4 h-4 text-[#3B82F6]" />
+                <span className="text-[11px] font-medium text-[#3B82F6]">Copy Address</span>
+              </button>
+              <a
+                href={`https://basescan.org/address/${evmAddress}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex flex-col items-center gap-1.5 py-3 px-2 bg-white rounded-xl border border-[#BFDBFE] hover:bg-[#EFF6FF] hover:border-[#0052FF]/30 transition-all group"
+              >
+                <ExternalLink className="w-4 h-4 text-[#3B82F6]" />
+                <span className="text-[11px] font-medium text-[#3B82F6]">Basescan</span>
+              </a>
+            </div>
+          </div>
+        )}
       </div>
       )}
 
@@ -1013,7 +1120,7 @@ export default function Profile() {
             </div>
 
             {/* Banner edit */}
-            <div className="h-[200px] relative overflow-hidden group">
+            <div className="h-[200px] relative overflow-hidden group cursor-pointer" onClick={() => pickImage("banner")}>
               {editBannerPreview || editBannerUrl ? (
                 <img
                   src={editBannerPreview || editBannerUrl}
@@ -1023,17 +1130,17 @@ export default function Profile() {
               ) : (
                 <div className="w-full h-full bg-gradient-to-br from-[#2563EB] via-[#3B82F6] to-[#60A5FA]" />
               )}
-              <div className="absolute inset-0 bg-black/30 flex items-center justify-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="absolute inset-0 bg-black/20 group-hover:bg-black/40 flex items-center justify-center gap-3 transition-all">
                 <button
-                  onClick={() => pickImage("banner")}
-                  className="w-11 h-11 bg-black/60 rounded-full flex items-center justify-center hover:bg-black/80 transition-colors"
+                  onClick={(e) => { e.stopPropagation(); pickImage("banner"); }}
+                  className="w-11 h-11 bg-black/50 group-hover:bg-black/70 rounded-full flex items-center justify-center transition-colors"
                 >
                   <Camera className="w-5 h-5 text-white" />
                 </button>
                 {(editBannerPreview || editBannerUrl) && (
                   <button
-                    onClick={() => { setEditBannerPreview(null); setEditBannerFile(null); setEditBannerUrl(""); }}
-                    className="w-11 h-11 bg-black/60 rounded-full flex items-center justify-center hover:bg-black/80 transition-colors"
+                    onClick={(e) => { e.stopPropagation(); setEditBannerPreview(null); setEditBannerFile(null); setEditBannerUrl(""); }}
+                    className="w-11 h-11 bg-black/50 group-hover:bg-black/70 rounded-full flex items-center justify-center transition-colors"
                   >
                     <X className="w-5 h-5 text-white" />
                   </button>
@@ -1089,6 +1196,21 @@ export default function Profile() {
                   className="w-full px-3 pt-6 pb-2 bg-transparent border border-[#E2E8F0] rounded-lg text-[15px] text-[#1A1A2E] focus:outline-none focus:border-[#2563EB] focus:ring-2 focus:ring-[#2563EB]/10 transition-all resize-none"
                 />
                 <span className="absolute right-3 top-2 text-[11px] text-[#94A3B8]">{editBio.length}/64</span>
+              </div>
+
+              {/* Website URL */}
+              <div className="relative">
+                <label className="absolute left-3 top-2 text-[11px] text-[#64748B]">Website</label>
+                <div className="absolute left-3 top-[26px] text-[#94A3B8]">
+                  <LinkIcon className="w-4 h-4" />
+                </div>
+                <input
+                  value={editWebsiteUrl}
+                  onChange={(e) => setEditWebsiteUrl(e.target.value)}
+                  placeholder="yoursite.com"
+                  maxLength={64}
+                  className="w-full pl-8 pr-3 pt-6 pb-2 bg-transparent border border-[#E2E8F0] rounded-lg text-[15px] text-[#1A1A2E] focus:outline-none focus:border-[#2563EB] focus:ring-2 focus:ring-[#2563EB]/10 transition-all"
+                />
               </div>
             </div>
           </div>
@@ -1223,7 +1345,7 @@ function ProfilePostCard({
       <div className="flex gap-3">
         {/* Avatar */}
         {avatarUrl ? (
-          <img src={avatarUrl} alt={profileName} className="w-10 h-10 rounded-full object-cover flex-shrink-0" />
+          <img src={avatarUrl} onError={handleIpfsImgError} alt={profileName} className="w-10 h-10 rounded-full object-cover flex-shrink-0" />
         ) : (
           <div className="w-10 h-10 rounded-full bg-gradient-to-br from-[#EBF4FF] to-[#DBEAFE] flex items-center justify-center text-lg font-bold text-[#2563EB] flex-shrink-0">
             {profileName.charAt(0).toUpperCase()}
@@ -1234,7 +1356,11 @@ function ProfilePostCard({
           {/* Author line */}
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className="font-bold text-[15px] text-[#1A1A2E] truncate">{profileName}</span>
-            <BadgeCheck className={`w-4 h-4 flex-shrink-0 ${GOLD_BADGE_USERNAMES.includes(profileUsername.toLowerCase()) ? "text-[#F59E0B]" : "text-[#2563EB]"}`} />
+            {GOLD_BADGE_USERNAMES.includes(profileUsername.toLowerCase()) ? (
+              <BadgeCheck className="w-4 h-4 flex-shrink-0 text-[#F59E0B]" />
+            ) : (() => { const owner = Object.keys(profileMap).find(k => profileMap[k]?.username?.toLowerCase() === profileUsername.toLowerCase()); const ts = parseInt(String(profileMap[owner || ""]?.createdAt || 0), 10); return ts > 0 && ts < BLUE_BADGE_CUTOFF_UNIX; })() ? (
+              <BadgeCheck className="w-4 h-4 flex-shrink-0 text-[#2563EB]" />
+            ) : null}
             <span className="text-[15px] text-[#64748B] truncate">@{profileUsername}</span>
             <span className="text-[#64748B]">·</span>
             <span className="text-[13px] text-[#64748B] flex-shrink-0">{timeAgo(ts)}</span>

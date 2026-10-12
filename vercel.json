@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/push/cron",
+      "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/quests/cron",
+      "schedule": "30 9 * * *"
+    },
+    {
+      "path": "/api/launchpad/cron",
+      "schedule": "* * * * *"
+    }
+  ]
+}

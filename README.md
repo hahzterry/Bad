@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Solana-Devnet-blueviolet?style=flat-square" />
+  <img src="https://img.shields.io/badge/Solana-Mainnet-blueviolet?style=flat-square" />
   <img src="https://img.shields.io/badge/Next.js-16-black?style=flat-square&logo=next.js" />
   <img src="https://img.shields.io/badge/Anchor-0.30-blue?style=flat-square" />
   <img src="https://img.shields.io/badge/Bags-SDK-orange?style=flat-square" />
@@ -62,7 +62,7 @@ ShyftClient (src/lib/program.ts)
 Treasury Sponsorship API    Bags SDK (Mainnet)
   /api/sponsor-tx              Token launch, trade, earnings
     ↓                           ↓
-Solana Devnet               Solana Mainnet
+Solana Mainnet               Solana Mainnet
   Anchor Program               Bags Protocol
 ```
 
@@ -70,7 +70,7 @@ Solana Devnet               Solana Mainnet
 |-------|-----------|
 | Frontend | Next.js 16, React 19, Tailwind CSS 4, Zustand |
 | Auth | Privy embedded wallets (Twitter OAuth, email, Google) |
-| On-chain Program | Rust / Anchor, deployed on Solana Devnet |
+| On-chain Program | Rust / Anchor, deployed on Solana Mainnet |
 | Encryption | NaCl Box via tweetnacl (X25519 + XSalsa20-Poly1305) |
 | Creator Tokens | @bagsfm/bags-sdk on Solana Mainnet |
 | RPC | Helius |
@@ -132,11 +132,10 @@ Each chat pair has a unique shared secret derived from Diffie-Hellman. Alice's c
 
 ### Prerequisites
 
-- Node.js 18+
-- Rust + Anchor CLI (for program development)
-- Solana CLI
+- **Node.js 20+** and **npm 10+**
+- (Optional, only for editing the on-chain program) Rust + [Anchor CLI](https://www.anchor-lang.com/docs/installation) + [Solana CLI](https://docs.solana.com/cli/install-solana-cli-tools)
 
-### Install & Run
+### 1. Clone & install
 
 ```bash
 git clone https://github.com/chandm1213/Shyft.lol.git
@@ -144,32 +143,54 @@ cd Shyft.lol
 npm install
 ```
 
-Create `.env.local`:
+### 2. Set up environment variables
 
-```
-NEXT_PUBLIC_HELIUS_API_KEY=your_helius_key
-HELIUS_DEVNET_RPC=https://devnet.helius-rpc.com/?api-key=your_key
-TREASURY_PRIVATE_KEY=[your_treasury_keypair_bytes]
+Copy `.env.example` to `.env.local` and fill in your own keys:
+
+```bash
+cp .env.example .env.local
 ```
 
-Run locally:
+The **minimum** needed to boot the app locally:
+
+| Variable | Where to get it |
+|---|---|
+| `NEXT_PUBLIC_HELIUS_API_KEY` | https://helius.dev (free tier) |
+| `HELIUS_API_KEY_PRIVATE` | same Helius key (server-only) |
+| `NEXT_PUBLIC_PRIVY_APP_ID` | https://dashboard.privy.io |
+| `TREASURY_PRIVATE_KEY` | Generate: `solana-keygen new -o treasury.json --no-bip39-passphrase` then paste the array from `cat treasury.json` |
+| `BAGS_API_KEY` + `BAGS_PARTNER_WALLET` | https://bags.fm (partner program) |
+| `PINATA_JWT` + `PINATA_GATEWAY` | https://pinata.cloud |
+
+Everything else (LiveKit, Upstash, Tenor, xAI, Resend) is **optional** — the related features (voice rooms, push, GIFs, AI button, report emails) gracefully no-op if those keys are missing.
+
+> ⚠️ Fund your treasury wallet with a small amount of SOL on mainnet (~0.5 SOL is plenty for a demo) — it pays all user gas + account rent.
+
+### 3. Run
 
 ```bash
 npm run dev
 ```
 
-### Build & Deploy the Solana Program
+Open [http://localhost:3000](http://localhost:3000) and sign in with Twitter / Google / email — Privy mints you an embedded Solana wallet on the spot.
+
+### 4. (Optional) Build & deploy the Solana program
+
+The deployed program ID is already hard-coded in `Anchor.toml` and `src/lib/idl.json`, so you can use the existing one without rebuilding. If you want to deploy your own:
 
 ```bash
 anchor build
-anchor deploy --provider.cluster devnet
+anchor deploy --provider.cluster mainnet
+# then update the declared id in programs/shadowspace/src/lib.rs and src/lib/idl.json
 ```
 
-### Deploy to Vercel
+### 5. Deploy to Vercel
 
 ```bash
 vercel --prod
 ```
+
+Add every variable from `.env.example` to your Vercel project's **Environment Variables** (Settings → Environment Variables) before deploying.
 
 ---
 
@@ -200,7 +221,7 @@ vercel --prod
 
 | | |
 |---|---|
-| **Blockchain** | Solana (Devnet for social, Mainnet for tokens) |
+| **Blockchain** | Solana Mainnet (social + tokens) |
 | **Smart Contracts** | Rust, Anchor Framework |
 | **Frontend** | Next.js 16, React 19, TypeScript, Tailwind CSS 4 |
 | **Auth** | Privy (Twitter OAuth, email, Google, embedded wallets) |
@@ -216,7 +237,7 @@ vercel --prod
 
 - **Live:** [shyft.lol](https://baddie.stream)
 - **X:** [@Shyft_lol](https://x.com/Shyft_lol)
-- **Program:** [`EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ`](https://explorer.solana.com/address/EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ?cluster=devnet)
+- **Program:** [`EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ`](https://explorer.solana.com/address/EEnouVLAoQGMEbrypEhP3Ct5RgCViCWG4n1nCZNwMxjQ)
 
 ---
 

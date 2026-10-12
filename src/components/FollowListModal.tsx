@@ -15,11 +15,14 @@ import { useProgram } from "@/hooks/useProgram";
 import { useWallet } from "@/hooks/usePrivyWallet";
 import { useAppStore } from "@/lib/store";
 import { toast } from "@/components/Toast";
+import { handleIpfsImgError } from "@/components/RichContent";
 import { PublicKey } from "@solana/web3.js";
 import { clearRpcCache } from "@/lib/program";
 
 // Gold badge for OG / founder accounts
 const GOLD_BADGE_USERNAMES = ["shaan", "shyft"];
+// Profiles created before this Unix timestamp (May 12 2026) keep their blue badge
+const BLUE_BADGE_CUTOFF_UNIX = 1778544000;
 
 type Tab = "verified_followers" | "followers" | "following";
 
@@ -44,6 +47,7 @@ interface UserRow {
   bio: string;
   isVerified: boolean; // has an on-chain profile
   isGoldBadge: boolean;
+  isOGUser: boolean; // joined before the blue badge cutoff date
 }
 
 export default function FollowListModal({
@@ -120,6 +124,7 @@ export default function FollowListModal({
         bio: profile?.bio || "",
         isVerified: !!profile?.username, // has a real on-chain profile
         isGoldBadge: GOLD_BADGE_USERNAMES.includes((profile?.username || "").toLowerCase()),
+        isOGUser: !GOLD_BADGE_USERNAMES.includes((profile?.username || "").toLowerCase()) && (() => { const ts = parseInt(String(profile?.createdAt || 0), 10); return ts > 0 && ts < BLUE_BADGE_CUTOFF_UNIX; })(),
       };
     });
   };
@@ -284,6 +289,7 @@ export default function FollowListModal({
                       {user.avatarUrl ? (
                         <img
                           src={user.avatarUrl}
+                          onError={handleIpfsImgError}
                           alt=""
                           className="w-10 h-10 rounded-full object-cover"
                         />
@@ -305,13 +311,11 @@ export default function FollowListModal({
                             <span className="font-bold text-[15px] text-[#1A1A2E] truncate hover:underline">
                               {user.displayName}
                             </span>
-                            {user.isVerified && (
-                              <BadgeCheck
-                                className={`w-4 h-4 flex-shrink-0 ${
-                                  user.isGoldBadge ? "text-[#F59E0B]" : "text-[#2563EB]"
-                                }`}
-                              />
-                            )}
+                            {user.isGoldBadge ? (
+                              <BadgeCheck className="w-4 h-4 flex-shrink-0 text-[#F59E0B]" />
+                            ) : user.isOGUser ? (
+                              <BadgeCheck className="w-4 h-4 flex-shrink-0 text-[#2563EB]" />
+                            ) : null}
                           </div>
                           {user.username && (
                             <span className="text-sm text-[#64748B]">@{user.username}</span>

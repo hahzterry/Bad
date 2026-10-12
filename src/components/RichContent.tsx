@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode, type SyntheticEvent } from "react";
 import { ExternalLink, Play, X } from "lucide-react";
 import { useAppStore } from "@/lib/store";
 
@@ -16,6 +16,133 @@ const URL_REGEX = /https?:\/\/[^\s<]+[^\s<.,;:!?"')\]]/gi;
 /* ── @mention regex ── */
 const MENTION_REGEX = /@([a-zA-Z0-9_]{1,30})/g;
 
+/* ── $TICKER regex — matches $BONK, $SOL, $WIF etc. (2–10 letters, word boundary) ── */
+const TICKER_REGEX = /\$([A-Za-z]{2,10})\b/g;
+
+/* ═══ Ticker price cache ═══ */
+type TickerData = { price: number; change24h: number; mint: string; name: string; image?: string; ts: number };
+const tickerCache = new Map<string, TickerData>();
+const pendingFetches = new Map<string, Promise<TickerData | null>>();
+const TICKER_TTL = 60_000;
+
+async function fetchTickerData(symbol: string): Promise<TickerData | null> {
+  const cached = tickerCache.get(symbol);
+  if (cached && Date.now() - cached.ts < TICKER_TTL) return cached;
+
+  if (pendingFetches.has(symbol)) return pendingFetches.get(symbol)!;
+
+  const promise = (async (): Promise<TickerData | null> => {
+    try {
+      const res = await fetch(
+        `https://api.dexscreener.com/latest/dex/search?q=${encodeURIComponent(symbol)}`
+      );
+      if (!res.ok) return null;
+      const data = await res.json();
+      const pair = (data.pairs || []).find(
+        (p: any) =>
+          p.chainId === "solana" &&
+          p.baseToken?.symbol?.toUpperCase() === symbol.toUpperCase()
+      );
+      if (!pair) return null;
+      const entry: TickerData = {
+        price: parseFloat(pair.priceUsd) || 0,
+        change24h: pair.priceChange?.h24 || 0,
+        mint: pair.baseToken.address,
+        name: pair.baseToken.name,
+        image: pair.info?.imageUrl,
+        ts: Date.now(),
+      };
+      tickerCache.set(symbol, entry);
+      return entry;
+    } catch {
+      return null;
+    } finally {
+      pendingFetches.delete(symbol);
+    }
+  })();
+
+  pendingFetches.set(symbol, promise);
+  return promise;
+}
+
+function formatTickerPrice(p: number): string {
+  if (!p || p <= 0) return "";
+  if (p >= 1000) return `$${p.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  if (p >= 1) return `$${p.toFixed(3)}`;
+  if (p >= 0.01) return `$${p.toFixed(4)}`;
+  if (p >= 0.0001) return `$${p.toFixed(6)}`;
+  return `$${p.toExponential(2)}`;
+}
+
+/* ═══ TickerChip — inline tradeable token pill ═══ */
+function TickerChip({ symbol }: { symbol: string }) {
+  const [data, setData] = useState<TickerData | null | "loading">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchTickerData(symbol).then((d) => {
+      if (!cancelled) setData(d);
+    });
+    return () => { cancelled = true; };
+  }, [symbol]);
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!data || data === "loading") return;
+    (window as any).__shyftTickerClick?.(symbol, data);
+  };
+
+  if (data === "loading") {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 mx-0.5 rounded-full border border-[#E2E8F0] bg-[#F8FAFC] text-[12px] font-bold text-[#94A3B8] animate-pulse align-middle">
+        ${symbol}
+      </span>
+    );
+  }
+
+  if (!data) {
+    return <span className="text-[#6366F1] font-semibold">${symbol}</span>;
+  }
+
+  const isUp = data.change24h >= 0;
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      title={`${data.name} · click to trade`}
+      className="inline-flex items-center gap-1 px-2 py-0.5 mx-0.5 rounded-full border transition-all duration-150 cursor-pointer align-middle hover:scale-105 active:scale-95 hover:shadow-sm"
+      style={{
+        background: "linear-gradient(135deg, #EEF2FF 0%, #F5F3FF 100%)",
+        borderColor: "#C7D2FE",
+      }}
+    >
+      {data.image && (
+        <img
+          src={data.image}
+          alt=""
+          className="w-3.5 h-3.5 rounded-full object-cover flex-shrink-0"
+          onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
+        />
+      )}
+      <span className="text-[12px] font-bold text-[#4F46E5] leading-none">${symbol}</span>
+      {!!data.price && (
+        <>
+          <span className="text-[11px] text-[#64748B] leading-none font-medium">
+            {formatTickerPrice(data.price)}
+          </span>
+          <span
+            className="text-[10px] font-semibold leading-none"
+            style={{ color: isUp ? "#16A34A" : "#DC2626" }}
+          >
+            {isUp ? "▲" : "▼"}{Math.abs(data.change24h).toFixed(1)}%
+          </span>
+        </>
+      )}
+    </button>
+  );
+}
+
 /* ── Image extensions ── */
 const IMAGE_EXTS = /\.(jpg|jpeg|png|gif|webp|svg|bmp|avif)(\?.*)?$/i;
 
@@ -24,6 +151,48 @@ const VIDEO_EXTS = /\.(mp4|webm|ogg|mov)(\?.*)?$/i;
 
 /* ── IPFS URLs (Pinata, etc.) ── */
 const IPFS_URL = /\.mypinata\.cloud\/ipfs\/|ipfs\.io\/ipfs\/|cloudflare-ipfs\.com\/ipfs\/|gateway\.pinata\.cloud\/ipfs\//i;
+
+/** Rewrite any IPFS gateway URL to the dedicated Pinata gateway to avoid the
+ *  shared gateway.pinata.cloud rate limits (429s that hide media from users). */
+const DEDICATED_IPFS_GATEWAY =
+  process.env.NEXT_PUBLIC_PINATA_GATEWAY || "amethyst-secondary-orca-737.mypinata.cloud";
+function normalizeIpfsUrl(url: string): string {
+  const match = url.match(/\/ipfs\/([a-zA-Z0-9]+)(\/[^?#]*)?(\?.*)?$/i);
+  if (match) {
+    const cid = match[1];
+    const path = match[2] || "";
+    return `https://${DEDICATED_IPFS_GATEWAY}/ipfs/${cid}${path}`;
+  }
+  return url;
+}
+/** Ordered gateway fallbacks for an IPFS URL. The dedicated gateway is tried
+ *  first (fast, no rate limits, serves our pinned content); public gateways
+ *  follow so posts whose CIDs aren't in our Pinata account (old/orphaned/
+ *  external uploads) still load instead of 403/404/429-ing. */
+export function ipfsGatewayChain(url: string): string[] {
+  const match = url.match(/\/ipfs\/([a-zA-Z0-9]+)(\/[^?#]*)?(\?.*)?$/i);
+  if (!match) return [url];
+  const cid = match[1];
+  const path = match[2] || "";
+  return [
+    `https://${DEDICATED_IPFS_GATEWAY}/ipfs/${cid}${path}`,
+    `https://ipfs.io/ipfs/${cid}${path}`,
+    `https://dweb.link/ipfs/${cid}${path}`,
+  ];
+}
+
+/** Drop-in onError handler for any <img> whose src is an IPFS gateway URL.
+ *  Advances through the gateway fallback chain so orphaned CIDs (not pinned to
+ *  our account, which 403 on the dedicated gateway) still load from a public
+ *  gateway. Attach as onError={handleIpfsImgError}. */
+export function handleIpfsImgError(e: SyntheticEvent<HTMLImageElement, Event>) {
+  const img = e.currentTarget;
+  const chain = ipfsGatewayChain(img.src);
+  if (chain.length <= 1) return; // not an IPFS URL — nothing to fall back to
+  const idx = chain.indexOf(img.src);
+  const next = idx === -1 ? 1 : idx + 1;
+  if (next < chain.length) img.src = chain[next];
+}
 /** IPFS URLs that are NOT videos — treat as images */
 const IPFS_IMAGE_URL = { test: (u: string) => IPFS_URL.test(u) && !VIDEO_EXTS.test(u) };
 /** IPFS URLs that ARE videos */
@@ -55,8 +224,11 @@ export function RichContent({ content, className = "" }: RichContentProps) {
     const parts: (string | ReactNode)[] = [];
     let lastIndex = 0;
 
-    // Combined regex for URLs and @mentions
-    const COMBINED_REGEX = new RegExp(`(${URL_REGEX.source})|(@[a-zA-Z0-9_]{1,30})`, "gi");
+    // Combined regex for URLs, @mentions, and $TICKERS
+    const COMBINED_REGEX = new RegExp(
+      `(${URL_REGEX.source})|(@[a-zA-Z0-9_]{1,30})|(\\$[A-Za-z]{2,10}\\b)`,
+      "gi"
+    );
     const matches = [...content.matchAll(COMBINED_REGEX)];
 
     for (const match of matches) {
@@ -66,6 +238,14 @@ export function RichContent({ content, className = "" }: RichContentProps) {
       // Text before the match
       if (idx > lastIndex) {
         parts.push(content.slice(lastIndex, idx));
+      }
+
+      // $TICKER
+      if (fullMatch.startsWith("$")) {
+        const symbol = fullMatch.slice(1).toUpperCase();
+        parts.push(<TickerChip key={`ticker-${idx}`} symbol={symbol} />);
+        lastIndex = idx + fullMatch.length;
+        continue;
       }
 
       // @mention
@@ -138,7 +318,7 @@ export function RichContent({ content, className = "" }: RichContentProps) {
           imageUrls.length === 1 ? "" : "grid grid-cols-2 gap-0.5"
         }`}>
           {imageUrls.map((url, i) => (
-            <ImagePreview key={i} url={url} single={imageUrls.length === 1} />
+            <ImagePreview key={i} url={IPFS_URL.test(url) ? normalizeIpfsUrl(url) : url} single={imageUrls.length === 1} />
           ))}
         </div>
       )}
@@ -150,14 +330,7 @@ export function RichContent({ content, className = "" }: RichContentProps) {
 
       {/* Video previews */}
       {videoUrls.map((url, i) => (
-        <div key={i} className="mt-3 rounded-2xl overflow-hidden border border-[#E2E8F0]">
-          <video
-            src={url}
-            controls
-            preload="metadata"
-            className="w-full max-h-[400px] object-contain bg-black"
-          />
-        </div>
+        <VideoPreview key={i} url={IPFS_URL.test(url) ? normalizeIpfsUrl(url) : url} />
       ))}
 
       {/* Link previews (for non-image, non-video URLs) */}
@@ -172,30 +345,67 @@ export function RichContent({ content, className = "" }: RichContentProps) {
 function ImagePreview({ url, single }: { url: string; single: boolean }) {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
+  const [gwIdx, setGwIdx] = useState(0);
+
+  const chain = ipfsGatewayChain(url);
+  const src = chain[Math.min(gwIdx, chain.length - 1)];
+
+  const handleError = () => {
+    // Try the next gateway before giving up (covers 403/404/429 on any host).
+    if (gwIdx < chain.length - 1) {
+      setGwIdx((i) => i + 1);
+    } else {
+      setError(true);
+    }
+  };
 
   if (error) return null;
 
   return (
     <a
-      href={url}
+      href={src}
       target="_blank"
       rel="noopener noreferrer"
       className="block relative bg-[#F1F5F9] cursor-pointer hover:opacity-95 transition-opacity"
       onClick={(e) => e.stopPropagation()}
     >
       {!loaded && (
-        <div className={`${single ? "h-[300px]" : "h-[200px]"} animate-pulse bg-[#E2E8F0]`} />
+        <div className={`${single ? "h-[220px] sm:h-[300px]" : "h-[160px] sm:h-[200px]"} animate-pulse bg-[#E2E8F0]`} />
       )}
       <img
-        src={url}
+        src={src}
         alt=""
         onLoad={() => setLoaded(true)}
-        onError={() => setError(true)}
+        onError={handleError}
         className={`w-full object-cover ${
-          single ? "max-h-[500px]" : "h-[200px]"
+          single ? "max-h-[320px] sm:max-h-[500px]" : "h-[160px] sm:h-[200px]"
         } ${loaded ? "" : "hidden"}`}
       />
     </a>
+  );
+}
+
+/* ═══ Video Preview ═══ */
+function VideoPreview({ url }: { url: string }) {
+  const [gwIdx, setGwIdx] = useState(0);
+  const chain = ipfsGatewayChain(url);
+  const src = chain[Math.min(gwIdx, chain.length - 1)];
+
+  const handleError = () => {
+    if (gwIdx < chain.length - 1) setGwIdx((i) => i + 1);
+  };
+
+  return (
+    <div className="mt-3 rounded-2xl overflow-hidden border border-[#E2E8F0]">
+      <video
+        key={src}
+        src={src}
+        controls
+        preload="metadata"
+        onError={handleError}
+        className="w-full max-h-[280px] sm:max-h-[400px] object-contain bg-black"
+      />
+    </div>
   );
 }
 

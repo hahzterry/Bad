@@ -5,7 +5,11 @@ import { ArrowUpRight, ArrowDownLeft, Shield, Lock, Send, DollarSign, ExternalLi
 import { useAppStore } from "@/lib/store";
 import { usePrivatePayment } from "@/hooks/usePrivatePayment";
 import { useMagicBlockPayment, type PaymentVisibility } from "@/hooks/useMagicBlockPayment";
+import { useConnection, useWallet } from "@/hooks/usePrivyWallet";
+import { PublicKey } from "@solana/web3.js";
 import type { Payment } from "@/types";
+
+const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 function timeAgo(timestamp: number): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
@@ -33,6 +37,42 @@ export default function Payments() {
   const activeError = paymentMode === "private" ? mbError : paymentError;
   const activeTxSig = paymentMode === "private" ? mbTxSignature : txSignature;
   const activeReset = paymentMode === "private" ? resetMb : resetPayment;
+
+  // Spendable balance for the selected mode. Without this the user only finds
+  // out they have no USDC when the transaction fails.
+  const { connection } = useConnection();
+  const { publicKey } = useWallet();
+  const [solBalance, setSolBalance] = useState<number | null>(null);
+  const [usdcBalance, setUsdcBalance] = useState<number | null>(null);
+  const [loadingBalance, setLoadingBalance] = useState(false);
+
+  const refreshBalances = useCallback(async () => {
+    if (!publicKey || !connection) return;
+    setLoadingBalance(true);
+    try {
+      const lamports = await connection.getBalance(publicKey);
+      setSolBalance(lamports / 1e9);
+      const accounts = await connection.getParsedTokenAccountsByOwner(publicKey, { mint: USDC_MINT });
+      const total = accounts.value.reduce(
+        (sum, a) => sum + (a.account.data.parsed?.info?.tokenAmount?.uiAmount ?? 0),
+        0,
+      );
+      // No token account at all is a legitimate zero, not an error.
+      setUsdcBalance(total);
+    } catch {
+      setSolBalance(null);
+      setUsdcBalance(null);
+    } finally {
+      setLoadingBalance(false);
+    }
+  }, [publicKey, connection]);
+
+  useEffect(() => { refreshBalances(); }, [refreshBalances]);
+
+  const activeBalance = paymentMode === "private" ? usdcBalance : solBalance;
+  const activeSymbol = paymentMode === "private" ? "USDC" : "SOL";
+  const insufficient =
+    activeBalance !== null && amount !== "" && parseFloat(amount) > activeBalance;
 
   // Payment records from local state
   const [loadingOnChain, setLoadingOnChain] = useState(false);
@@ -174,8 +214,31 @@ export default function Payments() {
               />
             </div>
             <div>
-              <label className="text-xs font-medium text-[#64748B] mb-1.5 block">Amount</label>
-              <div className="flex items-center gap-2 bg-[#F8FAFC] border border-[#E2E8F0] rounded-xl px-4 py-2.5">
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-xs font-medium text-[#64748B]">Amount</label>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-[#64748B]">
+                    {loadingBalance
+                      ? "Loading…"
+                      : activeBalance === null
+                        ? "Balance unavailable"
+                        : `Balance: ${activeBalance.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${activeSymbol}`}
+                  </span>
+                  {activeBalance !== null && activeBalance > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setAmount(String(activeBalance))}
+                      className="text-xs font-semibold text-[#2563EB] hover:underline"
+                    >
+                      Max
+                    </button>
+                  )}
+                  <button type="button" onClick={refreshBalances} aria-label="Refresh balance">
+                    <RefreshCw className={`w-3 h-3 text-[#94A3B8] ${loadingBalance ? "animate-spin" : ""}`} />
+                  </button>
+                </div>
+              </div>
+              <div className={`flex items-center gap-2 bg-[#F8FAFC] border rounded-xl px-4 py-2.5 ${insufficient ? "border-[#DC2626]" : "border-[#E2E8F0]"}`}>
                 <DollarSign className="w-4 h-4 text-[#94A3B8]" />
                 <input
                   type="number"
@@ -184,8 +247,18 @@ export default function Payments() {
                   placeholder="0.00"
                   className="flex-1 bg-transparent text-sm focus:outline-none"
                 />
-                <span className="text-xs font-medium text-[#64748B]">{paymentMode === "private" ? "USDC" : "SOL"}</span>
+                <span className="text-xs font-medium text-[#64748B]">{activeSymbol}</span>
               </div>
+              {insufficient && (
+                <p className="text-xs text-[#DC2626] mt-1.5">
+                  Not enough {activeSymbol} — you have {activeBalance?.toLocaleString(undefined, { maximumFractionDigits: 6 })}
+                </p>
+              )}
+              {paymentMode === "private" && usdcBalance === 0 && (
+                <p className="text-xs text-[#64748B] mt-1.5">
+                  No USDC in this wallet. Add USDC before sending a private payment.
+                </p>
+              )}
             </div>
 
             {/* Payment Flow visualization */}

@@ -13,8 +13,9 @@ import {
 } from "lucide-react";
 import { useWallet, pollConfirmation, getSharedConnection } from "@/hooks/usePrivyWallet";
 import { toast } from "@/components/Toast";
-import { VersionedTransaction } from "@solana/web3.js";
+import { VersionedTransaction, Transaction } from "@solana/web3.js";
 import { SOL_MINT, formatSOL } from "@/lib/bags";
+import { resolvePool, quote as shyftQuote, buildSwapTx as shyftSwapTx } from "@/lib/launchpad";
 
 interface TokenTradeProps {
   tokenMint: string;
@@ -22,6 +23,21 @@ interface TokenTradeProps {
   tokenImage?: string;
   onClose?: () => void;
   compact?: boolean;
+  /** Decimals of the non-SOL token (default 9, e.g. Bags tokens). xStocks use 8, pump.fun use 6. */
+  decimals?: number;
+  /** Show Bags.fm links/attribution. Set false for non-Bags tokens (e.g. xStocks). */
+  showBagsLinks?: boolean;
+  /**
+   * Which router to quote/swap through. Defaults to auto: tokens launched on
+   * Shyft route through our own bonding curve (and follow it to DAMM v2 after
+   * graduation), pump.fun mints go via Jupiter, everything else via Bags.
+   */
+  provider?: "bags" | "jupiter" | "shyft" | "auto";
+  /**
+   * Shyft pool address. Optional — when omitted the component asks the server
+   * whether this mint is one of ours, so existing call sites need no changes.
+   */
+  pool?: string;
 }
 
 function friendlyError(msg: string): string {
@@ -45,8 +61,29 @@ export default function TokenTrade({
   tokenImage,
   onClose,
   compact = false,
+  decimals: decimalsProp,
+  showBagsLinks = true,
+  provider = "auto",
+  pool: poolProp,
 }: TokenTradeProps) {
   const { publicKey, signTransaction } = useWallet();
+
+  // pump.fun tokens use 6 decimals and can't be priced by Bags — route via Jupiter.
+  const isPumpToken = tokenMint.endsWith("pump");
+  const useJupiter = provider === "jupiter" || (provider === "auto" && isPumpToken);
+  const tradeApi = useJupiter ? "/api/jup" : "/api/bags";
+
+  // Shyft-launched tokens trade on our own curve. Bags and Jupiter can't price
+  // a fresh DBC pool, and after graduation only our route knows to follow the
+  // token to its DAMM v2 pool — so resolve that first and take priority.
+  const [shyftPool, setShyftPool] = useState<string | null>(poolProp ?? null);
+  const [graduated, setGraduated] = useState(false);
+  const useShyft = provider === "shyft" || (provider === "auto" && !!shyftPool);
+  // Decimals must match the mint exactly — a wrong guess mis-scales both the
+  // quote amount and the displayed output by orders of magnitude. Start from
+  // an explicit prop or a heuristic, then resolve the real value on-chain below.
+  const fallbackDecimals = decimalsProp ?? (isPumpToken ? 6 : 9);
+  const [decimals, setDecimals] = useState<number>(fallbackDecimals);
   const [mode, setMode] = useState<"buy" | "sell">("buy");
   const [amount, setAmount] = useState("");
   const [loading, setLoading] = useState(false);
@@ -55,6 +92,34 @@ export default function TokenTrade({
   const [error, setError] = useState("");
   const [tokenBalance, setTokenBalance] = useState<number | null>(null);
   const [loadingBalance, setLoadingBalance] = useState(false);
+
+  // Resolve the mint's real decimals on-chain so quotes/displays are exact.
+  // An explicit decimalsProp always wins (caller knows better, e.g. xStocks).
+  useEffect(() => {
+    if (decimalsProp != null) {
+      setDecimals(decimalsProp);
+      return;
+    }
+    let cancelled = false;
+    // Reset to the heuristic while the real value loads so we never carry a
+    // previous token's decimals into a new mint.
+    setDecimals(isPumpToken ? 6 : 9);
+    (async () => {
+      try {
+        const res = await fetch("/api/rpc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getTokenSupply", params: [tokenMint] }),
+        });
+        const data = await res.json();
+        const dec = data?.result?.value?.decimals;
+        if (!cancelled && typeof dec === "number") setDecimals(dec);
+      } catch (e) {
+        console.warn("Failed to resolve token decimals, using fallback:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [tokenMint, decimalsProp, isPumpToken]);
 
   // Fetch token balance when switching to sell mode
   useEffect(() => {
@@ -99,6 +164,26 @@ export default function TokenTrade({
     fetchBalance();
   }, [mode, publicKey, tokenMint]);
 
+  // Ask once whether this mint is a Shyft launch (and where it trades now).
+  useEffect(() => {
+    if (poolProp || provider === "jupiter" || provider === "bags") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await resolvePool(tokenMint);
+        if (cancelled || !r.isShyftToken) return;
+        setShyftPool(r.pool);
+        setGraduated(r.graduated);
+        setDecimals(r.decimals);
+      } catch {
+        /* not a Shyft token, or lookup failed — fall through to Bags/Jupiter */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tokenMint, poolProp, provider]);
+
   // Get a quote when amount changes
   useEffect(() => {
     if (!amount || Number(amount) <= 0) {
@@ -110,12 +195,43 @@ export default function TokenTrade({
       setQuoting(true);
       setError("");
       try {
+        if (useShyft && shyftPool) {
+          const inDecimals = mode === "buy" ? 9 : decimals;
+          const amountIn = Math.floor(Number(amount) * Math.pow(10, inDecimals)).toString();
+          const q = await shyftQuote({
+            pool: shyftPool,
+            amountIn,
+            swapBaseForQuote: mode === "sell",
+            slippageBps: 300,
+          });
+          setGraduated(q.graduated);
+          // Normalise onto the field names the quote panel already renders,
+          // keeping the raw values the swap call needs.
+          setQuote({
+            ...q,
+            __shyft: true,
+            amountIn,
+            outAmount: q.amountOut,
+            minOutAmount: q.minimumAmountOut,
+          });
+          // A buy bigger than the curve's remaining room is reduced rather than
+          // rejected — tell the user instead of silently trading less.
+          if (q.cappedTo) {
+            setError(
+              `Only ${(Number(q.cappedTo) / 1e9).toFixed(4)} SOL left before this token graduates — your buy was reduced to that.`,
+            );
+          }
+          setQuoting(false);
+          return;
+        }
+
         const inputMint = mode === "buy" ? SOL_MINT : tokenMint;
         const outputMint = mode === "buy" ? tokenMint : SOL_MINT;
-        // Bags tokens use 9 decimals (same as SOL)
-        const amountSmallest = Math.floor(Number(amount) * 1e9);
+        // Buy-side input is always SOL (9 decimals); sell-side input is the token
+        const inputDecimals = mode === "buy" ? 9 : decimals;
+        const amountSmallest = Math.floor(Number(amount) * Math.pow(10, inputDecimals));
 
-        const res = await fetch("/api/bags", {
+        const res = await fetch(tradeApi, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "quote", inputMint, outputMint, amount: amountSmallest }),
@@ -131,7 +247,7 @@ export default function TokenTrade({
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [amount, mode, tokenMint]);
+  }, [amount, mode, tokenMint, decimals, useShyft, shyftPool]);
 
   const handleTrade = async () => {
     if (!publicKey || !signTransaction || !quote) return;
@@ -139,24 +255,47 @@ export default function TokenTrade({
     setError("");
 
     try {
-      const res = await fetch("/api/bags", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "swap", quoteResponse: quote, userPublicKey: publicKey.toBase58() }),
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error);
-
-      const tx = VersionedTransaction.deserialize(
-        Buffer.from(data.response.unsignedTxBase64, "base64")
-      );
-      const signed = await signTransaction(tx);
-
       const connection = getSharedConnection();
-      const sig = await connection.sendRawTransaction(signed.serialize());
+      let sig: string;
+
+      if (quote.__shyft && shyftPool) {
+        // Our route returns a legacy Transaction the user signs as fee payer.
+        const { transaction } = await shyftSwapTx({
+          wallet: publicKey.toBase58(),
+          pool: shyftPool,
+          amountIn: quote.amountIn,
+          minimumAmountOut: quote.minimumAmountOut,
+          swapBaseForQuote: mode === "sell",
+        });
+        const signed = await signTransaction(Transaction.from(Buffer.from(transaction, "base64")));
+        sig = await connection.sendRawTransaction(signed.serialize());
+      } else {
+        const res = await fetch(tradeApi, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "swap", quoteResponse: quote, userPublicKey: publicKey.toBase58() }),
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error);
+
+        const tx = VersionedTransaction.deserialize(
+          Buffer.from(data.response.unsignedTxBase64, "base64")
+        );
+        const signed = await signTransaction(tx);
+        sig = await connection.sendRawTransaction(signed.serialize());
+      }
+
       await pollConfirmation(connection, sig);
 
-      toast("success", `${mode === "buy" ? "Bought" : "Sold"} ${tokenSymbol} successfully! 🎉`);
+      // Report the confirmed swap for season quest points (fire-and-forget —
+      // the server verifies the signature on-chain, nothing here is trusted)
+      fetch("/api/quests/trade", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wallet: publicKey.toBase58(), signature: sig }),
+      }).catch(() => {});
+
+      toast("success", `${mode === "buy" ? "Bought" : "Sold"} $${tokenSymbol}`);
       setAmount("");
       setQuote(null);
     } catch (err: any) {
@@ -184,14 +323,16 @@ export default function TokenTrade({
             {mode === "buy" ? "Buy" : "Sell"} ${tokenSymbol}
           </span>
         </div>
-        <a
-          href={`https://bags.fm/${tokenMint}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-xs text-[#94A3B8] hover:text-[#2563EB] flex items-center gap-1"
-        >
-          Bags <ExternalLink className="w-3 h-3" />
-        </a>
+        {!useJupiter && showBagsLinks && (
+          <a
+            href={`https://kickstart.easya.io/token/${tokenMint}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-[#94A3B8] hover:text-[#2563EB] flex items-center gap-1"
+          >
+            Kickstart <ExternalLink className="w-3 h-3" />
+          </a>
+        )}
       </div>
 
       {/* Buy/Sell Toggle */}
@@ -252,7 +393,7 @@ export default function TokenTrade({
             <div className="flex items-center justify-between">
               <span className="text-[10px] text-[#64748B]">Balance:</span>
               <span className="text-[10px] font-semibold text-[#1A1A2E]">
-                {loadingBalance ? "Loading..." : tokenBalance !== null ? `${tokenBalance.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${tokenSymbol}` : "--"}
+                {loadingBalance ? "Loading..." : tokenBalance !== null ? `${tokenBalance.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${tokenSymbol}` : "--"}
               </span>
             </div>
             <div className="flex gap-1.5">
@@ -261,8 +402,13 @@ export default function TokenTrade({
                   key={pct}
                   onClick={() => {
                     if (tokenBalance && tokenBalance > 0) {
-                      const val = (tokenBalance * pct) / 100;
-                      setAmount(pct === 100 ? Math.floor(val).toString() : Math.floor(val).toString());
+                      // 100% sells the full balance; otherwise take the fraction.
+                      const val = pct === 100 ? tokenBalance : (tokenBalance * pct) / 100;
+                      // Keep fractional amounts (tokens/xStocks can be < 1); trim to the
+                      // token's decimals via floor so we never exceed the balance.
+                      const factor = Math.pow(10, decimals);
+                      const trimmed = Math.floor(val * factor) / factor;
+                      setAmount(trimmed.toString());
                     }
                   }}
                   disabled={!tokenBalance || tokenBalance <= 0}
@@ -290,7 +436,7 @@ export default function TokenTrade({
             <span className="text-[#64748B]">You {mode === "buy" ? "receive" : "get back"}</span>
             <span className="font-medium text-[#1A1A2E]">
               {mode === "buy"
-                ? `${(Number(quote.outAmount) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${tokenSymbol}`
+                ? `${(Number(quote.outAmount) / Math.pow(10, decimals)).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${tokenSymbol}`
                 : `${formatSOL(quote.outAmount)} SOL`}
             </span>
           </div>
@@ -304,7 +450,7 @@ export default function TokenTrade({
             <span className="text-[#64748B]">Min. received</span>
             <span className="text-[#475569]">
               {mode === "buy"
-                ? `${(Number(quote.minOutAmount) / 1e9).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${tokenSymbol}`
+                ? `${(Number(quote.minOutAmount) / Math.pow(10, decimals)).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${tokenSymbol}`
                 : `${formatSOL(quote.minOutAmount)} SOL`}
             </span>
           </div>
@@ -313,6 +459,14 @@ export default function TokenTrade({
               <span className="text-[#64748B]">Route</span>
               <span className="text-[#475569]">
                 {quote.routePlan.map((leg: any) => leg.venue).join(" → ")}
+              </span>
+            </div>
+          )}
+          {quote.__shyft && (
+            <div className="flex justify-between text-xs">
+              <span className="text-[#64748B]">Route</span>
+              <span className="text-[#475569]">
+                {graduated ? "Shyft → DAMM v2" : "Shyft bonding curve"}
               </span>
             </div>
           )}
@@ -345,12 +499,23 @@ export default function TokenTrade({
         )}
       </button>
 
-      {/* Bags Attribution */}
+      {/* Attribution */}
       <p className="text-center text-[10px] text-[#94A3B8] mt-2">
-        Trading powered by{" "}
-        <a href="https://bags.fm" target="_blank" rel="noopener noreferrer" className="text-[#2563EB] hover:underline">
-          Bags.fm
-        </a>
+        {!useJupiter && showBagsLinks ? (
+          <>
+            Trading powered by{" "}
+            <a href="https://kickstart.easya.io" target="_blank" rel="noopener noreferrer" className="text-[#2563EB] hover:underline">
+              Kickstart
+            </a>
+          </>
+        ) : (
+          <>
+            Trading routed via{" "}
+            <a href="https://jup.ag" target="_blank" rel="noopener noreferrer" className="text-[#2563EB] hover:underline">
+              Jupiter
+            </a>
+          </>
+        )}
       </p>
     </div>
   );

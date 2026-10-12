@@ -6,9 +6,10 @@
  */
 
 import { useMemo } from "react";
-import { usePrivy } from "@privy-io/react-auth";
+import { usePrivy, useWallets as useAllWallets } from "@privy-io/react-auth";
 import { useWallets as usePrivyWallets } from "@privy-io/react-auth/solana";
 import { Connection, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
+import { type ChainPreference, getChainPreference } from "@/components/ChainSelector";
 
 /** RPC endpoint — proxied through our API to keep the key hidden */
 const RPC_PROXY = typeof window !== "undefined"
@@ -68,9 +69,17 @@ export function getSharedConnection(): Connection {
 export function useWallet() {
   const { ready, authenticated, login, logout, user } = usePrivy();
   const { wallets } = usePrivyWallets();
+  const { wallets: allWallets } = useAllWallets();
 
   // Pick the first Solana wallet (embedded or external)
   const solanaWallet = wallets.length > 0 ? wallets[0] : null;
+
+  // Pick the first EVM wallet (embedded Base wallet or external MetaMask/Coinbase)
+  const evmWallet = allWallets.find(w => w.type === "ethereum") ?? null;
+  const evmAddress = evmWallet?.address ?? null;
+
+  // Which chain the user chose to connect with (stored in localStorage)
+  const activeChain: ChainPreference = getChainPreference() ?? "solana";
 
   const publicKey = useMemo(() => {
     if (!solanaWallet?.address) return null;
@@ -136,6 +145,9 @@ export function useWallet() {
     signTransaction,
     signAllTransactions,
     wallet: solanaWallet,
+    evmWallet,
+    evmAddress,
+    activeChain,
     login,
     logout,
     ready,
